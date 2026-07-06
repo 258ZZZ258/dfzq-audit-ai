@@ -23,7 +23,6 @@ def run(ctx: StageContext, doc_version_id: str) -> StageResult:
 
     if dv is not None and dv.source_format == "preseg" and corpus_type != "P-CASE":
         # P-PRESEG 文档:直接消费 raw 块流(clause_label 全保真,不经 IR;CP-010 T7)。
-        # preseg 案例(P-CASE)暂走下方 case_chunker(合成 IR),T9 换结构化直装。
         from pipeline.preseg.adapter import build_preseg_specs
         from pipeline.preseg.reader import parse_blocks
 
@@ -32,6 +31,14 @@ def run(ctx: StageContext, doc_version_id: str) -> StageResult:
         specs = build_preseg_specs(
             doc_version_id, blocks, ctx.config.chunk, entity_types=dv.entity_types
         )
+    elif dv is not None and dv.source_format == "preseg":
+        # preseg 案例(D4 虚拟文档):记录字段直建 case chunks(问题汇总→summary,描述→section;T9)
+        import json as _json
+
+        from pipeline.preseg.cases_ingest import build_case_specs_from_record
+
+        rec = _json.loads(ctx.object_store.get(dv.raw_object_key).decode("utf-8"))
+        specs = build_case_specs_from_record(doc_version_id, rec, ctx.config.chunk)
     else:
         ir = ctx.object_store.load_ir(doc_version_id)
         specs = build_specs(ir, corpus_type, ctx.config.chunk)

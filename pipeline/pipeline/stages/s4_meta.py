@@ -35,9 +35,15 @@ def run(ctx: StageContext, doc_version_id: str) -> StageResult:
     issuers = [(i.code, i.name) for i in ctx.db.get_issuers()]
 
     # P-CASE:在常规 L1 路径之外,额外抽案例要素 upsert 到 cases 表(P-INT/P-EXT/P-QA 不受影响)。
+    # preseg 案例(D9/D10)且档案 case_ref_source=structured → 结构化直装,零 LLM 零正则(T9)。
     doc = ctx.db.get(Document, dv.logical_id) if dv else None
     if doc and doc.corpus_type == "P-CASE":
-        _extract_case(ctx, dv, ir)
+        from pipeline.preseg import cases_ingest
+
+        if cases_ingest.use_structured_case(dv, ctx.config.profiles):
+            cases_ingest.extract_case_structured(ctx, dv)
+        else:
+            _extract_case(ctx, dv, ir)
 
     meta = l1_rules.extract(ir, issuers)
     conflicts = l1_rules.cross_check(

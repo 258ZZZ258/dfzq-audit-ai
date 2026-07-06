@@ -107,3 +107,106 @@ def _iso_date(value: str | None):
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+# ── T9:结构化直装完整链(替代 L1 正则 + case_l2 LLM 引用抽取)──────────────
+
+
+def use_structured_case(dv, profiles: dict) -> bool:
+    """分派条件(B8 配置缝):preseg 案例且 P-PRESEG 档案 case_ref_source=='structured'。
+
+    翻回 'llm' 即退回既有 L1(+case_l2)路径——机制保留不物理删除。
+    """
+    prof = profiles.get("P-PRESEG")
+    return (
+        dv is not None
+        and dv.source_format == "preseg"
+        and prof is not None
+        and getattr(prof, "case_ref_source", "llm") == "structured"
+    )
+
+
+def extract_case_structured(ctx: StageContext, dv: DocVersion) -> None:
+    """源案例记录(raw JSON)→ cases 行直装:**零 LLM、零正则抽取**。
+
+    违反法规子表经 ``align_cited``+``PgRegLookup``(纯逻辑,复用)归一对齐——结构化数据
+    仍需对齐验证(源给的是标题+条款标识,库内锚点是 doc_no+clause_path_norm);对齐失败
+    照旧仅置 ``ref_unresolved`` 标记不阻塞(§9 现状口径)。persons 原样照存(D6)。
+    respondent 单值列 = persons 首条(兼容既有消费面);全量在 persons。
+    """
+    from pipeline.meta.case_l2 import PgRegLookup
+    from pipeline.meta.case_ref_align import align_cited
+
+    rec = json.loads(ctx.object_store.get(dv.raw_object_key).decode("utf-8"))
+    cited_in = [
+        {"title": v.get("title"), "clause": v.get("clause_label")}
+        for v in rec.get("violated_regulations") or []
+    ]
+    aligned, unresolved = align_cited(cited_in, PgRegLookup(ctx.db))
+
+    persons = rec.get("persons") or []
+    first = persons[0] if persons else {}
+    rtype = first.get("type")
+    ctx.db.upsert_case(
+        dv.doc_version_id,
+        {
+            "penalty_org": rec.get("issuing_org"),
+            "doc_number": rec.get("doc_number"),
+            "penalty_date": _iso_date(rec.get("issue_date")),  # 发文日期≈处罚日期(#17 待样例校核)
+            "respondent": first.get("name"),
+            "respondent_type": rtype if rtype in ("机构", "个人") else None,
+            "violation_category": rec.get("case_type"),  # 值域 vs dict 待校核(#16),直写
+            "cited_regulations": aligned,
+            "ref_unresolved": unresolved,
+            "persons": persons,
+            "occurred_at": _iso_date(rec.get("occurred_at")),
+            "source_url": rec.get("source_url"),
+        },
+    )
+
+
+def build_case_specs_from_record(dvid: str, rec: dict, cfg) -> list:
+    """源案例记录 → case chunks(与 case_chunker 同约定:``case/{k}`` 伪路径,k 1-based)。
+
+    - ``case_section`` ← 案例描述(description);
+    - ``case_summary`` ← **问题汇总(人工撰写)**,替代规则截断版/默认关的 LLM 摘要(映射 #18);
+      缺失时退 case_name。搬运保真:文本原样,零页码(D2)。超预算复用 _split_oversize。
+    """
+    from common.chunk_id import compute_chunk_id
+    from pipeline.chunking.chunker import ChunkSpec, _split_oversize, count_tokens
+
+    parts: list[tuple[str, str, str]] = []  # (name, text, chunk_type)
+    if rec.get("description"):
+        parts.append(("描述", rec["description"], "case_section"))
+    summary = rec.get("problem_summary") or rec.get("case_name") or ""
+    if summary:
+        parts.append(("摘要", summary, "case_summary"))
+
+    specs: list = []
+    k = 0
+    for name, text, ctype in parts:
+        pieces = (
+            _split_oversize(text, cfg.target_token_max)
+            if count_tokens(text) > cfg.target_token_max
+            else [(text, False)]
+        )
+        for piece, hard in pieces:
+            k += 1
+            norm = f"case/{k}"
+            specs.append(
+                ChunkSpec(
+                    chunk_id=compute_chunk_id(dvid, norm, 0),
+                    doc_version_id=dvid,
+                    clause_path=name,
+                    clause_path_norm=norm,
+                    seq=0,
+                    text=piece,
+                    breadcrumb=name,
+                    page_start=None,  # D2 零页码
+                    page_end=None,
+                    token_count=count_tokens(piece),
+                    oversize=hard,
+                    chunk_type=ctype,
+                )
+            )
+    return specs

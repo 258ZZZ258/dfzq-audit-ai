@@ -33,10 +33,13 @@ class RegLookup(Protocol):
 
 
 def _clause_no(raw: str) -> str | None:
-    """从「第十五条」「第十五条第二款」「第二十一条之一」抽条号核心交 normalize_clause_no。"""
+    """「第十五条」「第十五条第二款」「第二十一条之一(第二款)」→ 条号核心,交 normalize。"""
     s = strip_ws(to_halfwidth(raw)).removeprefix("第")
     s = re.sub(r"条之", "之", s, count=1)  # 插入条「X条之N」→「X之N」(归一前合形)
     core = s.split("条", 1)[0]  # 取首个「条」前(去掉「第Y款/项」等后缀)
+    # 插入条+款尾(「二十一之一第二款」):「条」已被上行合形消掉,款尾改以「第」剥除
+    # (普通条已在上一步切干净,此步对其无操作)。CP-010 T9 边界修复,舍款取条(D5)。
+    core = core.split("第", 1)[0]
     return core or None
 
 
