@@ -49,7 +49,21 @@ def test_seed_loads_violation_and_aliases(pg):
     counts = pg.seed_dicts(REPO / "seeds")
     assert counts["violation_types"] >= 1
     assert counts["aliases"] >= 1
-    assert any(v.dict_version == "v0-draft-2026-06" for v in pg.get_violation_types())
+    # 不硬编码具体版本串(564fb55 换 CSV 版本号后此断言恒假,被旧栈残留数据掩盖至干净栈才暴露):
+    # 意图 = seed 正确落 dict_version 列 → 断言全部行带非空 v0-draft 系版本。
+    assert all(
+        v.dict_version and v.dict_version.startswith("v0-draft")
+        for v in pg.get_violation_types()
+    )
     assert len(pg.get_aliases()) >= 1
-    # R4 三级匹配「别名→文号」路径:v0-draft seed 含 ≥1 条带 canonical_doc_number
-    assert any(a.canonical_doc_number for a in pg.get_aliases())
+    # R4「别名→文号」列的**透传保真**断言(CSV 有则库有、CSV 无不虚构)。不再硬编码"≥1 条带文号":
+    # 564fb55 起 demo 自举别名表 70 行全无 canonical_doc_number(数据策展事实,R4 该路径
+    # consumed-when-present 降级),旧断言靠旧栈残留行掩盖至干净栈才暴露。
+    import csv as _csv
+
+    with (REPO / "seeds" / "dict_aliases.csv").open(encoding="utf-8") as f:
+        csv_has_dn = any(
+            (r.get("canonical_doc_number") or "").strip() for r in _csv.DictReader(f)
+        )
+    db_has_dn = any(a.canonical_doc_number for a in pg.get_aliases())
+    assert db_has_dn == csv_has_dn

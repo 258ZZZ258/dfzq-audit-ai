@@ -62,7 +62,14 @@ def test_seed_dicts(pg):
     counts = pg.seed_dicts(REPO / "seeds")
     assert counts["issuers"] >= 1 and counts["biz_domains"] >= 1
     assert counts["entity_types"] >= 1 and counts["departments"] >= 1
-    assert pg.get(DictIssuer, "CSRC").name == "中国证券监督管理委员会"
+    # 透传保真:CSV 首行 code→name 落库一致。不硬编码 code(564fb55 换 CSV code 系
+    # CSRC→ISS01 后旧断言恒 None,被旧栈残留行掩盖至干净栈才暴露)。
+    import csv as _csv
+
+    with (REPO / "seeds" / "dict_issuers.csv").open(encoding="utf-8") as f:
+        first = next(_csv.DictReader(f))
+    row = pg.get(DictIssuer, first["code"])
+    assert row is not None and row.name == first["name"]
 
 
 def test_transition_writes_event(pg, doc_version):
