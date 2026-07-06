@@ -215,6 +215,217 @@ def register_batch(
     return report
 
 
+# ── P-PRESEG 预切块批次入口(CP-010 T5;SPEC-PRESEG §3/§4-S0)─────────────────
+# 与 register_batch 平行的入口:不走文件 magic-number 白名单(输入是块 JSONL 非原始文件);
+# 幂等键 = source_doc_id + content_hash(替代 SHA-256 文件哈希语义);效力状态映射在此应用
+# (manifest 原值仅 S0 可见,见 preseg/status_map.py 模块注);案例经 cases.jsonl 合成虚拟文档。
+
+
+def register_preseg_batch(
+    ctx: StageContext, batch_id: str, batch_dir: Path, manifest_path: Path
+) -> RegisterReport:
+    from pipeline.preseg import cases_ingest
+    from pipeline.preseg.reader import (
+        PresegFormatError,
+        read_cases,
+        validate_manifest_header,
+        validate_manifest_rows,
+    )
+
+    header, rows = _read_manifest(Path(manifest_path))
+    try:
+        validate_manifest_header([c for c in (header or []) if c not in (None, "")])
+        validate_manifest_rows(rows)
+    except PresegFormatError as e:
+        return RegisterReport(batch_id, accepted=False, reject_reason=str(e))
+
+    _ensure_batch(ctx, batch_id, Path(batch_dir), Path(manifest_path))
+    report = RegisterReport(batch_id, accepted=True)
+    for row in rows:
+        if not row.get("filename"):
+            continue
+        report.outcomes.append(_register_one_preseg(ctx, batch_id, Path(batch_dir), row, report))
+
+    cases_path = Path(batch_dir) / "cases.jsonl"
+    if cases_path.exists():
+        try:
+            cases = read_cases(cases_path)
+        except PresegFormatError as e:  # cases 文件违约:整文件拒收,文档行不受影响
+            report.warnings.append(f"cases.jsonl 拒收:{e}")
+            cases = []
+        for case in cases:
+            dup = cases_ingest.find_existing_case_doc(ctx, case)
+            if dup is not None:
+                _record_duplicate(ctx, dup, batch_id, case.case_name)
+                report.outcomes.append(
+                    FileOutcome(case.case_name, "DUPLICATE",
+                                doc_version_id=dup.doc_version_id, reason="案例幂等键重复")
+                )
+                continue
+            dvid, lid = cases_ingest.synthesize_case_doc(ctx, batch_id, case)
+            report.outcomes.append(
+                FileOutcome(case.case_name, PipelineState.REGISTERED.value,
+                            doc_version_id=dvid, logical_id=lid)
+            )
+    return report
+
+
+def _find_by_source_key(ctx: StageContext, sid: str, chash: str) -> DocVersion | None:
+    with ctx.db.session() as s:
+        return s.scalars(
+            select(DocVersion).where(
+                DocVersion.source_doc_id == sid, DocVersion.content_hash == chash
+            )
+        ).first()
+
+
+def _latest_by_source_id(ctx: StageContext, sid: str) -> DocVersion | None:
+    with ctx.db.session() as s:
+        return s.scalars(
+            select(DocVersion)
+            .where(DocVersion.source_doc_id == sid)
+            .order_by(DocVersion.created_at.desc())
+        ).first()
+
+
+def _register_one_preseg(
+    ctx: StageContext, batch_id: str, batch_dir: Path, row: dict, report: RegisterReport
+) -> FileOutcome:
+    from pipeline.preseg.reader import PresegFormatError, read_blocks
+    from pipeline.preseg.status_map import map_effective_status
+
+    fn = str(row["filename"])
+    blocks_path = batch_dir / "blocks" / f"{fn}.jsonl"
+    if not blocks_path.exists():
+        return FileOutcome(fn, "MISSING", reason=f"blocks/{fn}.jsonl 不存在")
+
+    sid = str(row["source_doc_id"]).strip()
+    chash = str(row["content_hash"]).strip()
+    dup = _find_by_source_key(ctx, sid, chash)
+    if dup is not None:  # 幂等:同源主键 + 同内容哈希 → 不重登
+        _record_duplicate(ctx, dup, batch_id, fn)
+        report.warnings.append(f"{fn}: 源幂等键重复,关联 {dup.doc_version_id}")
+        return FileOutcome(
+            fn, "DUPLICATE", doc_version_id=dup.doc_version_id, reason="源幂等键重复"
+        )
+
+    data = blocks_path.read_bytes()
+    reason, ecode = None, None
+    try:
+        read_blocks(blocks_path)  # 契约校验(违约 → 隔离供人工,不带病进管线)
+    except PresegFormatError as e:
+        reason = f"preseg blocks 契约违约:{e}"
+    perm = str(row.get("perm_tag") or "")
+    if reason is None and not perm:
+        reason = "密级缺失"
+
+    # 版本链:显式 supersedes 列优先;否则同 source_doc_id 换 hash → 自动 revise_replace
+    rel, targets = version_chain.classify(str(row.get("supersedes") or ""), split_targets=set())
+    logical_id, supersedes_vid, relation = _resolve_version(ctx, rel, targets, report, fn)
+    if logical_id is None and supersedes_vid is None:
+        prior = _latest_by_source_id(ctx, sid)
+        if prior is not None:  # 源记录更新(内容延续):继承 logical,替代旧版
+            logical_id, supersedes_vid, relation = (
+                prior.logical_id, prior.doc_version_id, RelationType.REVISE_REPLACE.value,
+            )
+            report.warnings.append(f"{fn}: source_doc_id={sid} 内容哈希变化,自动 revise_replace")
+
+    # 效力状态(D3 源权威):命中直写 + source 留痕;未知值保默认 + meta_confirm(不猜)
+    mapped = map_effective_status(row.get("effective_status"))
+    version_status = mapped.status or "effective"
+    status_source = "source" if mapped.status else None
+    needs_status_review = mapped.needs_review or (
+        mapped.status == "superseded" and supersedes_vid is None  # 被替代但无目标版本 → 人工
+    )
+
+    corpus = str(row.get("corpus_type") or "")
+    title = str(row.get("title") or "")
+    tags_raw = str(row.get("tags") or "").strip()
+    dvid = str(ULID())
+    raw_key = ctx.object_store.put_raw(corpus, batch_id, dvid, "jsonl", data)
+    status = PipelineState.QUARANTINED if reason else PipelineState.REGISTERED
+
+    with ctx.db.session() as s:
+        if logical_id is None:
+            logical_id = str(ULID())
+            s.add(Document(logical_id=logical_id, corpus_type=corpus, title=title or None))
+            s.flush()
+        s.add(
+            DocVersion(
+                doc_version_id=dvid,
+                logical_id=logical_id,
+                batch_id=batch_id,
+                source_format="preseg",  # 通道标识(非文件格式;reader 口径钉子)
+                source_hash=hashlib.sha256(data).hexdigest(),
+                raw_object_key=raw_key,
+                source_filename=fn,
+                pipeline_status=status.value,
+                perm_tag=perm or None,
+                biz_domain=str(row.get("biz_domain") or "") or None,
+                issuer=str(row.get("issuer") or "") or None,
+                doc_number=str(row.get("doc_number") or "") or None,
+                issue_date=_parse_issue_date(row.get("issue_date")),
+                effective_date=_parse_issue_date(row.get("effective_date")),
+                sub_type=str(row.get("sub_type") or "") or None,
+                title=title or None,
+                version_relation=relation,
+                supersedes_version_id=supersedes_vid,
+                version_status=version_status,
+                version_status_source=status_source,
+                source_doc_id=sid,
+                content_hash=chash,
+                issuer_level_src=str(row.get("issuer_level_src") or "") or None,
+                tags=[t for t in tags_raw.split(";") if t] or None,
+                file_no=str(row.get("file_no") or "") or None,
+                source_created_by=str(row.get("source_created_by") or "") or None,
+                last_error_code=ecode,
+            )
+        )
+        s.flush()
+        s.add(
+            PipelineEvent(
+                doc_version_id=dvid,
+                from_state=None,
+                to_state=status.value,
+                error_code=ecode,
+                actor=ctx.user,
+                detail={
+                    "preseg": {"source_doc_id": sid, "effective_status": mapped.raw,
+                               "version_status_source": status_source},
+                    **({"reason": reason} if reason else {}),
+                },
+            )
+        )
+        if needs_status_review:
+            s.add(
+                ReviewQueue(
+                    queue_id=str(ULID()),
+                    queue_type="meta_confirm",
+                    doc_version_id=dvid,
+                    reason=f"源效力状态待人工核:{mapped.raw!r}"
+                    +("(映射未知)" if mapped.needs_review else "(superseded 无目标版本)"),
+                    evidence={"effective_status": mapped.raw, "mapped": mapped.status},
+                    status="open",
+                )
+            )
+        if reason:
+            s.add(
+                ReviewQueue(
+                    queue_id=str(ULID()),
+                    queue_type="quarantine",
+                    doc_version_id=dvid,
+                    reason=reason,
+                    evidence={"error_code": ecode, "perm_tag": perm or None},
+                    status="open",
+                )
+            )
+
+    return FileOutcome(
+        fn, status.value, doc_version_id=dvid, logical_id=logical_id,
+        reason=reason or "", error_code=ecode,
+    )
+
+
 def _register_one(
     ctx: StageContext, batch_id: str, batch_dir: Path, row: dict, report: RegisterReport,
     split_targets: set[str],

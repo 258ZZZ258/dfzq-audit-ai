@@ -12,6 +12,7 @@ preseg **通道性**由扩展列(source_doc_id/content_hash)与 dv 级 ``source_
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +52,8 @@ class ViolatedReg:
 @dataclass(frozen=True)
 class PresegCase:
     case_name: str
+    source_case_id: str | None = None  # 源系统案例主键(幂等键;缺失时退 record_hash)
+    record_hash: str = ""  # reader 计算的记录规范化哈希(幂等键第二分量,源侧无需提供)
     doc_number: str | None = None  # 发文文号
     issuing_org: str | None = None  # 发文单位
     issue_date: str | None = None  # 发文日期(ISO 串,类型待样例)
@@ -161,6 +164,8 @@ def read_cases(path: Path) -> list[PresegCase]:
         cases.append(
             PresegCase(
                 case_name=rec["case_name"],
+                source_case_id=str(rec.get("source_case_id") or "") or None,
+                record_hash=_record_hash(rec),
                 doc_number=rec.get("doc_number") or None,
                 issuing_org=rec.get("issuing_org") or None,
                 issue_date=rec.get("issue_date") or None,
@@ -177,6 +182,12 @@ def read_cases(path: Path) -> list[PresegCase]:
     if errors:
         raise PresegFormatError(f"{path.name} 行级校验失败:\n" + "\n".join(errors))
     return cases
+
+
+def _record_hash(rec: dict) -> str:
+    """记录规范化哈希(sort_keys JSON → sha256):案例幂等键第二分量,源侧无需提供。"""
+    canon = json.dumps(rec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
 def _read_jsonl(path: Path) -> list[tuple[int, dict]]:
