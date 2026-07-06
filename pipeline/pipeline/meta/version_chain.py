@@ -80,3 +80,15 @@ def live_status(effective_date: datetime.date | None, today: datetime.date) -> s
     if effective_date is not None and effective_date > today:
         return "upcoming"
     return "effective"
+
+
+def resolve_live_status(dv, today: datetime.date) -> str:
+    """上线态解析(CP-010 T8,决策 D3 按通道分权威)。
+
+    preseg 且 ``version_status_source == "source"``(S0 已按源效力状态直写)→ **保源值**,
+    不被 ``live_status`` 推导覆盖——否则源说"已废止/被替代"的历史件会在 s5 被翻回 effective。
+    其余(自建通道 / 源状态未知未标 source)→ 原 ``live_status`` 推导,行为零变更。
+    """
+    if dv.source_format == "preseg" and dv.version_status_source == "source":
+        return dv.version_status
+    return live_status(dv.effective_date, today)
