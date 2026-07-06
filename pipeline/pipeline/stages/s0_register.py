@@ -330,6 +330,14 @@ def _register_one_preseg(
             )
             report.warnings.append(f"{fn}: source_doc_id={sid} 内容哈希变化,自动 revise_replace")
 
+    # 元数据完整率:批次报告 warning,不作门(D10 哨兵化——源的元数据缺漏拦了=制造覆盖缺口)
+    missing_meta = [
+        k for k in ("issuer", "effective_date", "issuer_level_src")
+        if not str(row.get(k) or "").strip()
+    ]
+    if missing_meta:
+        report.warnings.append(f"{fn}: 元数据缺漏(报告项,不拦):{missing_meta}")
+
     # 效力状态(D3 源权威):命中直写 + source 留痕;未知值保默认 + meta_confirm(不猜)
     mapped = map_effective_status(row.get("effective_status"))
     version_status = mapped.status or "effective"

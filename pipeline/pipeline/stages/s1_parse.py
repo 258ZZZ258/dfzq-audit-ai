@@ -15,8 +15,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from common.ir import IRDocument, SourceFormat
-from common.pg_models import DocVersion
+from common.ir import Block, BlockType, IRDocument, SourceFormat
+from common.pg_models import Document, DocVersion
 from pipeline.parsing.adapter import ParseResult
 from pipeline.parsing.factory import make_ocr_parser, make_parser
 from pipeline.parsing.page_align import align_blocks
@@ -39,6 +39,8 @@ def start(ctx: StageContext, doc_version_id: str) -> StageResult:  # noqa: ARG00
 def run(ctx: StageContext, doc_version_id: str) -> StageResult:
     dv = ctx.db.get(DocVersion, doc_version_id)
     data = ctx.object_store.get(dv.raw_object_key)
+    if dv.source_format == "preseg":  # P-PRESEG:解析退化为装载(CP-010 T6)
+        return _load_preseg(ctx, doc_version_id, dv, data)
     if dv.source_format == "docx":
         return _parse_docx(ctx, doc_version_id, data)
     if dv.source_format == "pdf":
@@ -47,6 +49,45 @@ def run(ctx: StageContext, doc_version_id: str) -> StageResult:
         return _parse_image(ctx, doc_version_id, data, dv.source_format)
     return _quarantine(doc_version_id, ErrorCode.FORMAT_NOT_WHITELISTED.value,
                        f"白名单外格式 {dv.source_format}")
+
+
+def _load_preseg(
+    ctx: StageContext, dvid: str, dv: DocVersion, data: bytes
+) -> StageResult:
+    """P-PRESEG 装载:raw(blocks JSONL / 案例记录 JSON)→ 合成 IR → QC_PENDING。
+
+    IR 契约保真(每源块一 paragraph Block,page=None),下游 S2 零感知;此 IR **只服务 QC**
+    (⑥文本质量哨兵,D10)——S3 的 preseg_adapter 直接消费 raw 块流(clause_label 全保真,
+    IR 不承载,T7)。案例虚拟文档(D4)以 case_name/问题汇总/案例描述合成文本块,使跨库
+    charset 损坏同样被 ⑥ 拦住。契约违约本应 S0 已拦,此处兜底隔离。
+    """
+    import json as _json
+
+    from pipeline.preseg.reader import PresegFormatError, parse_blocks
+
+    doc = ctx.db.get(Document, dv.logical_id) if dv.logical_id else None
+    try:
+        if doc is not None and doc.corpus_type == "P-CASE":  # 案例记录 JSON(虚拟文档)
+            rec = _json.loads(data.decode("utf-8"))
+            texts = [t for t in (rec.get("case_name"), rec.get("problem_summary"),
+                                 rec.get("description")) if t]
+        else:  # blocks JSONL
+            blocks = parse_blocks(data.decode("utf-8"), dv.source_filename or dvid)
+            texts = [b.text for b in blocks]
+    except (PresegFormatError, UnicodeDecodeError, ValueError) as e:
+        return _quarantine(dvid, None, f"preseg 装载失败:{e}")
+
+    ir = IRDocument(
+        doc_version_id=dvid,
+        source_format=SourceFormat.PRESEG,
+        title=dv.title,
+        blocks=[
+            Block(index=i, type=BlockType.PARAGRAPH, text=t, page=None)
+            for i, t in enumerate(texts)
+        ],
+    )
+    ctx.object_store.put_ir(ir)
+    return StageResult(next_state=PipelineState.QC_PENDING)
 
 
 def _parse_docx(ctx: StageContext, dvid: str, data: bytes) -> StageResult:

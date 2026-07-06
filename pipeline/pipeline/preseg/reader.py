@@ -96,36 +96,44 @@ def validate_manifest_rows(rows: list[dict]) -> None:
 
 
 def read_blocks(path: Path) -> list[PresegBlock]:
-    """blocks JSONL → 按 block_seq 升序的块列表;任何行级违约汇总后整文件拒收。"""
-    records = _read_jsonl(path)
+    """blocks JSONL 文件 → 块列表(见 parse_blocks)。"""
+    return parse_blocks(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_blocks(text: str, name: str) -> list[PresegBlock]:
+    """blocks JSONL 文本 → 按 block_seq 升序的块列表;任何行级违约汇总后整体拒收。
+
+    与 read_blocks 分离:S1 装载分支从 ObjectStore 取 raw bytes 直接解析(无本地文件)。
+    """
+    records = _parse_jsonl(text, name)
     if not records:
-        raise PresegFormatError(f"{path.name}: 空 blocks 文件")
+        raise PresegFormatError(f"{name}: 空 blocks 文件")
     errors: list[str] = []
     blocks: list[PresegBlock] = []
     seen_seq: set[int] = set()
     for lineno, rec in records:
         seq = rec.get("block_seq")
-        text = rec.get("text")
+        blk_text = rec.get("text")
         if not isinstance(seq, int):
             errors.append(f"line {lineno}: block_seq 缺失或非整数")
             continue
         if seq in seen_seq:
             errors.append(f"line {lineno}: block_seq={seq} 重复")
             continue
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(blk_text, str) or not blk_text.strip():
             errors.append(f"line {lineno}: text 缺失或为空")
             continue
         seen_seq.add(seq)
         blocks.append(
             PresegBlock(
                 block_seq=seq,
-                text=text,
+                text=blk_text,
                 clause_label=rec.get("clause_label") or None,
                 is_table=bool(rec.get("is_table", False)),
             )
         )
     if errors:
-        raise PresegFormatError(f"{path.name} 行级校验失败:\n" + "\n".join(errors))
+        raise PresegFormatError(f"{name} 行级校验失败:\n" + "\n".join(errors))
     return sorted(blocks, key=lambda b: b.block_seq)
 
 
@@ -191,10 +199,14 @@ def _record_hash(rec: dict) -> str:
 
 
 def _read_jsonl(path: Path) -> list[tuple[int, dict]]:
-    """JSONL → [(行号, 记录)];坏 JSON 行汇总拒收。"""
+    return _parse_jsonl(path.read_text(encoding="utf-8"), path.name)
+
+
+def _parse_jsonl(text: str, name: str) -> list[tuple[int, dict]]:
+    """JSONL 文本 → [(行号, 记录)];坏 JSON 行汇总拒收。"""
     errors: list[str] = []
     out: list[tuple[int, dict]] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for lineno, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -207,5 +219,5 @@ def _read_jsonl(path: Path) -> list[tuple[int, dict]]:
             continue
         out.append((lineno, rec))
     if errors:
-        raise PresegFormatError(f"{path.name} JSON 解析失败:\n" + "\n".join(errors))
+        raise PresegFormatError(f"{name} JSON 解析失败:\n" + "\n".join(errors))
     return out

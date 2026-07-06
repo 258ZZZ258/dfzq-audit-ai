@@ -24,3 +24,11 @@ P-CASE:
   sampling_rate: 0.0
   qc_indicators: [page_anchor_complete, text_quality]
   case_ref_source: llm
+# P-PRESEG:预切块源通道档案(CP-010;档案键,非 corpus_type 取值——分区仍 P-INT/P-EXT/P-CASE)。
+# QC 哨兵化(D10):门仅留⑥文本质量(跨库 charset 损坏);页码/条款树类指标随 D2/预切块前提禁用;
+# 元数据完整率为批次报告 warning(S0),不作门。case_ref_source=structured:案例引用走源结构化
+# 数据直装,case_l2 LLM 通道对本档案停用。
+P-PRESEG:
+  sampling_rate: 0.0
+  qc_indicators: [text_quality]
+  case_ref_source: structured
