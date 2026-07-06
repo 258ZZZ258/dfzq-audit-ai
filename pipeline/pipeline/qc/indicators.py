@@ -229,9 +229,22 @@ _CASE_INDICATORS = [
     page_anchor_complete,
     text_quality,
 ]
-_PROFILE_INDICATORS = {"P-QA": _QA_INDICATORS, "P-CASE": _CASE_INDICATORS}
+# 配置缺失时的硬编码默认(旧行为快照)。生产路径经 profiles.yaml 的 qc_indicators 配置驱动
+# (CP-010 T1 配置缝);此表仅作 profile=None / qc_indicators=None 的回退,保旧调用点零变更。
+_DEFAULT_PROFILE_INDICATORS = {"P-QA": _QA_INDICATORS, "P-CASE": _CASE_INDICATORS}
+
+#: 指标名(函数名)→ 实现。profiles.yaml 的 qc_indicators 按此表解析。
+INDICATOR_REGISTRY = {fn.__name__: fn for fn in [*ALL_INDICATORS, qa_pair_completeness]}
 
 
-def indicators_for(corpus_type: str) -> list:
-    """按 corpus_type 选指标集;未登记的(P-INT/P-EXT/未知/空)走条款树全七项。"""
-    return _PROFILE_INDICATORS.get(corpus_type, _CLAUSE_INDICATORS)
+def indicators_for(corpus_type: str, profile=None) -> list:
+    """选指标集:profile.qc_indicators 配置优先(名单经 INDICATOR_REGISTRY 解析,未知名即错);
+    无配置(profile=None 或旧形态 qc_indicators=None)回退硬编码默认——未登记 corpus_type 走全七项。
+    """
+    names = getattr(profile, "qc_indicators", None)
+    if names is not None:
+        unknown = [n for n in names if n not in INDICATOR_REGISTRY]
+        if unknown:
+            raise ValueError(f"未知 QC 指标名(profiles.yaml qc_indicators): {unknown}")
+        return [INDICATOR_REGISTRY[n] for n in names]
+    return _DEFAULT_PROFILE_INDICATORS.get(corpus_type, _CLAUSE_INDICATORS)

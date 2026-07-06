@@ -119,7 +119,16 @@ class ObligationConfig(BaseModel):
 
 
 class ProfileConfig(BaseModel):
-    sampling_rate: float  # 抽检率:M1 保留字段,不消费
+    """per-profile 档案(CP-010 T1 配置缝:QC 启用集/阈值覆盖/案例引用来源进 yaml)。
+
+    qc_indicators=None(旧 yaml 形态)→ 回退 indicators._DEFAULT_PROFILE_INDICATORS 硬编码默认,
+    保证既有四 profile 与配置缺失场景行为零变更(对拍测试 test_preseg_profiles_seam)。
+    """
+
+    sampling_rate: float  # 抽检率(l2_llm._sampled 消费)
+    qc_indicators: list[str] | None = None  # S2 启用集(INDICATOR_REGISTRY 名);None=硬编码默认
+    qc_threshold_overrides: dict[str, float] = {}  # 对 QcThresholds 字段的 per-profile 覆盖
+    case_ref_source: str = "llm"  # 案例引用来源:llm(case_l2 抽取)| structured(预切块直装)
 
 
 class Settings(BaseModel):

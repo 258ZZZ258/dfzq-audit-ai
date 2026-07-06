@@ -16,7 +16,8 @@ def run(ctx: StageContext, doc_version_id: str) -> StageResult:
     dv = ctx.db.get(DocVersion, doc_version_id)
     doc = ctx.db.get(Document, dv.logical_id) if dv else None
     corpus_type = (doc.corpus_type if doc else "") or "P-INT"  # 按 profile 选 QC 指标集
-    report = evaluate(ir, ctx.config.qc, corpus_type)
+    profile = ctx.config.profiles.get(corpus_type)  # 配置缝:启用集/阈值覆盖(CP-010 T1)
+    report = evaluate(ir, ctx.config.qc, corpus_type, profile)
     _set_marginal(ctx, doc_version_id, report.marginal)
 
     if report.failed:
