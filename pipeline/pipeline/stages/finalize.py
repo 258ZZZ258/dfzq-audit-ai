@@ -82,23 +82,33 @@ def _run_verify(ctx: StageContext, dvid: str) -> None:
     t2_hit = None
     t4_pass = None
     t4_rate = None
+    t4_skipped = None
     error = None
     try:
+        from common.pg_models import DocVersion
         from eval.anchor_replay import run_replay
         from eval.smoke import run_smoke
 
-        t4 = run_replay(ctx, [dvid])
-        t4_pass, t4_rate = t4.passed, t4.pass_rate
+        dv = ctx.db.get(DocVersion, dvid)
+        if dv is not None and dv.source_format == "preseg":
+            # P-PRESEG:零页码(D2),T4 页窗回放无锚点可放——**豁免**(同 DEGRADED_INDEXED 先例),
+            # 显式留痕而非静默;T2 冒烟(语义命中,不依赖页码)照跑。CP-010 T11。
+            t4_skipped = "preseg 零页码(D2),T4 豁免"
+        else:
+            t4 = run_replay(ctx, [dvid])
+            t4_pass, t4_rate = t4.passed, t4.pass_rate
         if ctx.embedding is not None and ctx.milvus is not None:
             sm = run_smoke(ctx, [dvid])
             t2_hit = sm.per_doc[0]["hit"] if sm.per_doc else None
     except Exception as e:  # 不阻断终态,但记为失败(否则 report 聚合不到 → 显 None 掩盖)
         error = str(e)
-        if t4_pass is None:  # T4 都没跑出来 → 计失败,而非从报告里消失
+        if t4_pass is None and t4_skipped is None:  # T4 没跑出来且非豁免 → 计失败
             t4_pass = False
         logger.warning("finalize T2/T4 评测异常(不阻断,记入报告):%s", e)
 
     detail = {"verify": {"t2_hit": t2_hit, "t4_pass": t4_pass, "t4_rate": t4_rate}}
+    if t4_skipped is not None:
+        detail["verify"]["t4_skipped"] = t4_skipped
     if error is not None:
         detail["verify"]["error"] = error
     try:

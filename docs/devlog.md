@@ -48,6 +48,7 @@ spec-driven:`SPEC` → `PLAN`(分阶段)→ `TASKS`(任务级验收)→ 逐模�
 | P0 Foundation | 2026-06-26;PR #17 | 字典/业务域迁移 + IR ocr_conf/表格 markdown(T0.1/T0.2,0009) | contracts / structuring devlog |
 | P0 Phase 1 | 2026-06-26;PR #18 | 切块 internal_refs / case_ref_align / xlsx parser-only(收窄)(0010) | structuring devlog |
 | P0 Phase 2 案例 L2 | 2026-06-26;PR #20 | 案例引用外规对齐 + 违规事由分类(默认关,0011) | metadata / enrich devlog |
+| CP-010 P-PRESEG 预切块源适配 | 2026-07-06;feat/preseg | 源系统(法规制度平台)预切块语料+现成案例链接接入:P-PRESEG 档案(配置缝)/推导器/S0 源幂等键/S1 装载/S3 adapter/案例结构化直装(零 LLM)点亮桥接双通道/效力状态源权威/QC 哨兵化(0013–0014);决策 D1–D10 | preseg-docs/(SPEC/PLAN/TASKS/RTM/devlog)+ 调研报告 v0.2 |
 | P0 Phase 2 续 业务域 L2 | 2026-06-26;PR #22 | L2 业务域多值打标 + profile 分档(P0 LLM 4 触点全清) | metadata / index devlog |
 | P0 续 ref_resolver R4 | 2026-06-28;feat/ref-resolver-r4 | 跨文档指代三级查(文号→标题→dict_aliases 别名)+ 四态 standoff(resolved/ambiguous/pending_target/unresolved)+ R3/R4 span 去重(零迁移) | structuring devlog |
 | P0 续 扫描件 OCR | 2026-06-29;feat/ocr-mineru | MinerU pipeline 后端(in-process do_parse → IR + ocr_conf + 表格)+ s1 路由(扫描件/图片→OCR,PIPELINE_OCR_BACKEND 默认关向后兼容)+ 白名单 jpg/png;spike risk-first(multiprocessing spawn 约束)+ 零迁移 | parsing devlog |
