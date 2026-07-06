@@ -16,12 +16,25 @@ from pipeline.states import PipelineState
 
 
 def run(ctx: StageContext, doc_version_id: str) -> StageResult:
-    ir = ctx.object_store.load_ir(doc_version_id)
     dv = ctx.db.get(DocVersion, doc_version_id)
     degraded = bool(dv and dv.degraded)  # 降级件(degrade 处置重入)→ chunk 标 degraded
     doc = ctx.db.get(Document, dv.logical_id) if dv else None
     corpus_type = (doc.corpus_type if doc else "") or "P-INT"  # 按 profile 选切块策略
-    specs = build_specs(ir, corpus_type, ctx.config.chunk)
+
+    if dv is not None and dv.source_format == "preseg" and corpus_type != "P-CASE":
+        # P-PRESEG 文档:直接消费 raw 块流(clause_label 全保真,不经 IR;CP-010 T7)。
+        # preseg 案例(P-CASE)暂走下方 case_chunker(合成 IR),T9 换结构化直装。
+        from pipeline.preseg.adapter import build_preseg_specs
+        from pipeline.preseg.reader import parse_blocks
+
+        raw = ctx.object_store.get(dv.raw_object_key)
+        blocks = parse_blocks(raw.decode("utf-8"), dv.source_filename or doc_version_id)
+        specs = build_preseg_specs(
+            doc_version_id, blocks, ctx.config.chunk, entity_types=dv.entity_types
+        )
+    else:
+        ir = ctx.object_store.load_ir(doc_version_id)
+        specs = build_specs(ir, corpus_type, ctx.config.chunk)
     ctx.db.replace_chunks(doc_version_id, [_to_row(s, degraded) for s in specs])
     return StageResult(next_state=PipelineState.META_REVIEW)
 
@@ -46,4 +59,5 @@ def _to_row(spec: ChunkSpec, degraded: bool) -> Chunk:
         embed_status=spec.embed_status,  # 建块即 pending(§8.1)
         oversize=spec.oversize,  # 单段超长字符硬切的质量信号
         degraded=degraded,  # 取自 dv.degraded;chunk_status 用模型默认 staging
+        entity_type=spec.entity_type,  # D7:preseg 文档级适用对象继承(自建通道 None)
     )

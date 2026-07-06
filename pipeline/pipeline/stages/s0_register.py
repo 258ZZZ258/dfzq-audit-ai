@@ -383,6 +383,9 @@ def _register_one_preseg(
                 source_doc_id=sid,
                 content_hash=chash,
                 issuer_level_src=str(row.get("issuer_level_src") or "") or None,
+                entity_types=[
+                    t for t in str(row.get("entity_types") or "").strip().split(";") if t
+                ] or None,
                 tags=[t for t in tags_raw.split(";") if t] or None,
                 file_no=str(row.get("file_no") or "") or None,
                 source_created_by=str(row.get("source_created_by") or "") or None,

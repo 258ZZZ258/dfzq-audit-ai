@@ -108,6 +108,8 @@ class DocVersion(AuditMixin, Base):
     # 效力状态权威留痕(D3 按通道分权威):chain(版本链推导,现状默认)| source(源系统直给)
     version_status_source: Mapped[str | None] = mapped_column(String(16))
     issuer_level_src: Mapped[str | None] = mapped_column(String(64))  # 源法律位阶/效力层级原值
+    # 源"适用对象"(文档级,D7):S3 继承写每 chunk.entity_type → Milvus 投影;迁移 0014
+    entity_types: Mapped[list | None] = mapped_column(JSONB)
     tags: Mapped[list | None] = mapped_column(JSONB)  # 源标签
     file_no: Mapped[str | None] = mapped_column(String(128))  # 内规文件编号(与文号并存的双编号)
     source_created_by: Mapped[str | None] = mapped_column(String(64))  # 源系统创建人(≠created_by)

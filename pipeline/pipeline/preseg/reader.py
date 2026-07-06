@@ -22,7 +22,7 @@ from common.manifest import REQUIRED_COLUMNS
 #: 扩展列(SPEC §3.2):幂等键两分量 + 源元数据。列集精确匹配,缺/多整批拒收(承 s0 语义)。
 PRESEG_EXTRA_COLUMNS = [
     "source_doc_id", "content_hash", "effective_status",
-    "issuer_level_src", "tags", "file_no", "source_created_by",
+    "issuer_level_src", "entity_types", "tags", "file_no", "source_created_by",
 ]
 PRESEG_REQUIRED_COLUMNS = [*REQUIRED_COLUMNS, *PRESEG_EXTRA_COLUMNS]
 
