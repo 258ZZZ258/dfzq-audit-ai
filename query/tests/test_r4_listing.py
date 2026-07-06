@@ -38,7 +38,11 @@ def test_field_names_whitelist_only():
     expr = build_milvus_expr(
         EnumSpec(chunk_type_pref=True, biz_domains=["反洗钱"], entity_types=["证券公司"])
     )
-    assert _ALLOWED_EXPR_FIELDS == frozenset({"chunk_type", "biz_domain", "entity_type"})
+    # perm_tag 加入白名单供边界二(routes_boundary)复用同一加固构造;但 R4 build_milvus_expr
+    # 自身仍只产 chunk_type/biz_domain/entity_type,绝不出现 perm_tag/status 等其它列名。
+    assert _ALLOWED_EXPR_FIELDS == frozenset(
+        {"chunk_type", "biz_domain", "entity_type", "perm_tag"}
+    )
     for forbidden in ("status", "perm_tag", "text", "doc_version_id", "drop", "delete"):
         assert forbidden not in expr
 
