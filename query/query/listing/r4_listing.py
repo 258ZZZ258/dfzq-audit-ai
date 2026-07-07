@@ -19,7 +19,8 @@ from query.listing.dimensions import EnumSpec, extract_enum_spec
 from query.refuse.coverage_refusal import refuse_coverage
 
 #: Milvus 标量过滤**唯一允许**的字段名(白名单;绝不接受用户串作字段名)。
-_ALLOWED_EXPR_FIELDS = frozenset({"chunk_type", "biz_domain", "entity_type"})
+#: ``perm_tag`` 供边界二 ``routes_boundary``(Java 预计算 perm_tags → 前置过滤)复用同一加固构造。
+_ALLOWED_EXPR_FIELDS = frozenset({"chunk_type", "biz_domain", "entity_type", "perm_tag"})
 
 _LIST_COLS = ["制度名称", "文号", "命中条款", "页码", "状态"]
 #: 边界声明(§6.4 + §15-③):枚举有效性受 E2 外规覆盖范围所限,不向甲方承诺穷举。
@@ -30,8 +31,11 @@ _E1_DEGRADE_NOTE = "E1 义务标签未覆盖该批语料,未按义务过滤。"
 _FALLBACK_SCOPE = ["现行制度(未识别具体业务事项)"]
 
 
-def _array_any(field: str, values: list[str]) -> str:
-    """``array_contains_any(<白名单字段>, [<json 转义值>])``。field 为白名单常量,值经 json 转义。"""
+def array_any_expr(field: str, values: list[str]) -> str:
+    """``array_contains_any(<白名单字段>, [<json 转义值>])``。field 为白名单常量,值经 json 转义。
+
+    Milvus expr 转义的**唯一**构造点(注入红线纵深);边界二 perm_tags 过滤也走这里。
+    """
     assert field in _ALLOWED_EXPR_FIELDS  # 字段名只能来自白名单常量(开发期不变式)
     return f"array_contains_any({field}, {json.dumps(values, ensure_ascii=False)})"
 
@@ -42,9 +46,9 @@ def build_milvus_expr(spec: EnumSpec) -> str | None:
     if spec.chunk_type_pref:
         clauses.append('chunk_type == "clause"')
     if spec.biz_domains:
-        clauses.append(_array_any("biz_domain", list(spec.biz_domains)))
+        clauses.append(array_any_expr("biz_domain", list(spec.biz_domains)))
     if spec.entity_types:
-        clauses.append(_array_any("entity_type", list(spec.entity_types)))
+        clauses.append(array_any_expr("entity_type", list(spec.entity_types)))
     return " and ".join(clauses) if clauses else None
 
 

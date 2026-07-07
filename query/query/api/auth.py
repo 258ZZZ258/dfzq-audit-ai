@@ -6,9 +6,13 @@
 
 from __future__ import annotations
 
+import os
+import secrets
 from dataclasses import dataclass
 
-from query.api.errors import forbidden
+from fastapi import Header
+
+from query.api.errors import ApiError, forbidden
 
 
 @dataclass
@@ -29,6 +33,19 @@ def current_principal() -> Principal:
     真接入:解析 SSO/session,未认证 → ``raise unauthenticated()``(401)。
     """
     return Principal()
+
+
+def require_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
+    """边界二服务鉴权(SPEC-BOUNDARY §3.3):``X-Internal-Token`` == env ``AUDIT_AI_INTERNAL_TOKEN``。
+
+    **无身份**——只证明调用方是 audit-biz,不产生 ``Principal``/角色(与上面用户向 stub 无关,
+    勿混用)。env 未配置视为边界关闭(fail-closed 401);比较走 ``secrets.compare_digest``
+    (常数时间,防时序侧信道)。缺失/不符 → 401 ``B104``(错误码已回灌 biz v0.4 §8.3)。
+    """
+    expected = os.environ.get("AUDIT_AI_INTERNAL_TOKEN") or ""
+    provided = x_internal_token or ""
+    if not expected or not secrets.compare_digest(provided.encode(), expected.encode()):
+        raise ApiError(401, "B104", "内部令牌无效")
 
 
 def require_export_permission(principal: Principal) -> None:

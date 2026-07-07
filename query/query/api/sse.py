@@ -15,10 +15,11 @@ import time
 
 from query.contract import RouteType
 
-_KEEPALIVE = ": keep-alive\n\n"   # 注释帧(空闲防代理断连;编排层按需插)
+KEEPALIVE = ": keep-alive\n\n"   # 注释帧(空闲防代理断连;编排层按需插;边界二首帧也用它)
 
 
-def _sse(event: str, data: dict) -> str:
+def format_sse(event: str, data: dict) -> str:
+    """SSE 帧编码单点(前端向 + 边界二共用,防两处 wire format 漂移)。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
@@ -31,20 +32,20 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
     try:
         # F8:先落 user 原问(在 accepted 之前)——即使随后断连/关流,被 accepted 的问题也不丢
         svc.store.append_message(cid, role="user", content=raw_query)
-        yield _sse("accepted", {"conversation_id": cid, "message_id": mid})
+        yield format_sse("accepted", {"conversation_id": cid, "message_id": mid})
 
         # N0 多轮归并(与 agent.ask 内部一致):route/structured/检索用归并句(多轮 parity,F3)
         query = _merge(svc, raw_query, history)
 
         route = svc.agent.route_only(query)
-        yield _sse("route", {
+        yield format_sse("route", {
             "route_type": route.value, "review_required": route is RouteType.JUDGMENTAL,
         })
 
         structured = svc.structured_for(
             query, include_superseded=include_superseded, corpus=corpus,
         )
-        yield _sse("structured", structured.to_dict())
+        yield format_sse("structured", structured.to_dict())
 
         t0 = time.perf_counter()
         if route is RouteType.EVIDENCE:
@@ -53,21 +54,21 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
             for kind, payload in _evidence_stream(svc, query, include_superseded, corpus):
                 if kind == "delta":
                     streamed = True
-                    yield _sse("answer_delta", {"text": payload})
+                    yield format_sse("answer_delta", {"text": payload})
                 else:
                     result = payload
             # F10:result-only(覆盖拒答:充分性闸/无忠实引用,流式前决定)→ 补发答复正文,客户端不空
             if not streamed and result is not None:
                 for block in result.answer_blocks:
-                    yield _sse("answer_delta", {"text": block.content})
+                    yield format_sse("answer_delta", {"text": block.content})
         else:
             # 已归并 → 传空 history 避免 agent 二次归并(F5;query 已自足)
             result = svc.agent.ask(query, history=[])
             for block in result.answer_blocks:
-                yield _sse("answer_delta", {"text": block.content})
+                yield format_sse("answer_delta", {"text": block.content})
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-        yield _sse("citations", {"citations": [c.to_dict() for c in result.citations]})
+        yield format_sse("citations", {"citations": [c.to_dict() for c in result.citations]})
 
         result.structured = structured
         hit_counts = _hit_counts(structured)
@@ -77,7 +78,7 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
         }
         _append_assistant(svc, cid, result, hit_counts, elapsed_ms, mid)   # user 已落,仅补答复
 
-        yield _sse("done", {
+        yield format_sse("done", {
             "message_id": mid, "elapsed_ms": elapsed_ms,
             "total_hits": sum(hit_counts.values()), "hit_counts": hit_counts,
             "ai_label": result.ai_label, "review_required": result.review_required,
@@ -87,7 +88,7 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
     except Exception:
         # §9 推进可靠性:失败不静默 + 落失败态(user 已落,仅补失败 assistant);best-effort(F6)
         _append_failed(svc, cid, mid)
-        yield _sse("error", {"error": {"code": "INTERNAL_ERROR", "message": "生成失败"}})
+        yield format_sse("error", {"error": {"code": "INTERNAL_ERROR", "message": "生成失败"}})
 
 
 def _evidence_stream(svc, query, include_superseded, corpus):

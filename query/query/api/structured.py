@@ -39,8 +39,8 @@ def assemble_structured(cands, case_cands, chunk_doc, case_rows) -> StructuredRe
     """
     internal = [c for c in cands if c.corpus_type == _INT]
     external = [c for c in cands if c.corpus_type == _EXT]
-    norm = _normalizer([c.score for c in cands])
-    norm_case = _normalizer([c.score for c in case_cands])
+    norm = make_normalizer([c.score for c in cands])
+    norm_case = make_normalizer([c.score for c in case_cands])
     return StructuredResult(
         regulations=TabPayload(items=_regulations(internal, chunk_doc, norm)),
         clauses=TabPayload(items=_clauses(internal, chunk_doc, norm)),
@@ -179,8 +179,8 @@ def _dedup_by_doc(cands, chunk_doc):
     return sorted(best.values(), key=lambda t: t[0].score, reverse=True)
 
 
-def _normalizer(scores):
-    """候选集内 min-max 归一 → [0,1]。空 → 0.0;单点/等值 → 1.0。"""
+def make_normalizer(scores):
+    """候选集内 min-max 归一 → [0,1]。空 → 0.0;单点/等值 → 1.0。边界二 citation.score 同口径。"""
     if not scores:
         return lambda _s: 0.0
     lo, hi = min(scores), max(scores)

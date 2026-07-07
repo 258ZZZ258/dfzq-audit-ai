@@ -21,25 +21,30 @@ audit-ai 的 query-api(PR#39,已并 `main`)是对着产品原型**直连前端**
 用户决策(2026-07-02):**守边界**——audit-ai 在现有 `QueryAgent.ask` 上加**薄壳** `POST /v1/query`,**不改 AI 内核**
 (漂移在 HTTP 薄壳、不在域逻辑;`contract.py` 的 `QueryResult/AnswerBlock/Citation` 本就是 CP-A 对齐对象)。
 
-## 本仓要做什么(摘要;完整 build recipe 见上方 `BOUNDARY-RECONCILIATION-001.md §3`)
+## 本仓做了什么(已落地;联调说明见 `BOUNDARY-v1-query-api.md`)
 
-在 `query/query/api/` 新增薄壳 `POST /v1/query`:
+已在 `query/query/api/routes_boundary.py` 新增薄壳 `POST /v1/query`:
 
-1. `X-Internal-Token` 静态共享密钥鉴权、**无身份**(勿复用 `auth.py` 的 subject/role)。
-2. 请求 `filters{perm_tags, corpus_types, project_id, owner}` → 构 **Milvus 前置过滤**(检索**前**生效,红线:算在 Java、用在 Python)。
-3. SSE 事件 `meta / delta / citation / done / error`(词汇见 boundary 附录 A);`citation` 加 per-hit `score`
-   (v1.1.0 加法,供 biz 装制度查询四-Tab「匹配度」)。
-4. `request_id` 注入 Langfuse trace。
-5. 会话 / 身份 / PG 引用回查 / 导出**不进边界**(归 biz);`QueryAgent.ask`、`structured_for` 域逻辑**原样复用**。
+1. `X-Internal-Token` 静态共享密钥鉴权、**无身份**(`auth.require_internal_token`,常数时间比较、
+   env 未配 fail-closed;**不**复用 `auth.py` 的 subject/role)。
+2. 请求 `filters{perm_tags, corpus_types, project_id, owner}` → 经 `Retriever.scoped()` 构 **Milvus 前置过滤**
+   (检索**前**生效,红线:算在 Java、用在 Python)。`perm_tag` 过滤走 `r4_listing.array_any_expr` 加固构造
+   (白名单字段 + json 转义,防注入);`audit_project` 未接入 schema → **显式 422**(不静默零命中)。
+3. SSE 事件 `meta / delta / citation / done / error`(帧编码复用 `sse.format_sse`);`citation` 的 per-hit
+   `score` 从 ask **同一次检索**候选派生(`scoped(collector=...)`),**不二次检索**;归一同 `structured.make_normalizer`。
+4. `request_id` 经 `QueryAgent.ask(trace_id=...)` 注入 Langfuse trace。
+5. 会话 / 身份 / PG 引用回查 / 导出**不进边界**(归 biz);`QueryAgent.ask` 域逻辑**原样复用,不改内核**。
+   前端向 `/api/query/v1/*` 契约(`contract.py` 各 Hit)**不受影响**。
 
-差异对照 BR-1~8(端点形状 / 前置过滤红线 / 无身份 / 状态-回查-导出归属)见 `BOUNDARY-RECONCILIATION-001.md §2`。
+差异对照 BR-1~8 见 `BOUNDARY-RECONCILIATION-001.md §2`。
 
-> ⚠ **分支**:query-api 在 `main`。请从 audit-ai `main` 切分支实施(如 `feat/v1-query-boundary`)。
-> **同机可执行 finding**(gitignore、不入库):本仓 `.review/findings.json` → `boundary.contract.query-api-drift`(critical)。
+> **待批契约项**:SSE `error.code=B105`(查询热路径内部错误,服务向)沿用 B104 先例入 B1xx 服务向段,
+> **需回灌** biz `boundary.v1.yaml` / v0.4 §8.3 后定稿;热路径 PG 依赖与 yaml「不依赖 PG」措辞的残余待修
+> (见 `BOUNDARY-v1-query-api.md` 两节「已知限制」)。
 
 ## 双向引用坐标(remote ↔ remote)
 
 | 方向 | 位置 |
 |---|---|
 | audit-ai → audit-biz | 即本文件;引 `https://github.com/258ZZZ258/audit-biz` 的 `boundary.v1.yaml` + `BOUNDARY-RECONCILIATION-001.md` |
-| audit-biz → audit-ai | `BOUNDARY-RECONCILIATION-001.md §7/§8`;远端坐标 `https://github.com/258ZZZ258/audit-ai`,待改代码 `query/query/api/*` |
+| audit-biz → audit-ai | `BOUNDARY-RECONCILIATION-001.md §7/§8`;远端坐标 `https://github.com/258ZZZ258/audit-ai`,落地代码 `query/query/api/routes_boundary.py` |

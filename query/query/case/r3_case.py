@@ -16,7 +16,7 @@ from common.pg_models import DocVersion
 from query.case.bridge import cases_for_clauses, citation_key
 from query.case.case_card import build_case_card
 from query.contract import AnswerBlock, BlockType, QueryResult, RouteType
-from query.retrieve.hybrid import drop_degraded
+from query.retrieve.hybrid import drop_degraded, scope_active
 
 _NO_CASE = "未检索到与该问句相似的处罚案例。"
 
@@ -62,9 +62,14 @@ def answer_case(query: str, retriever, pg, qcfg) -> QueryResult:
 
 
 def attach_cases(result: QueryResult, query: str, citations, retriever, pg, qcfg) -> QueryResult:
-    """R1 充分答复尾挂相关案例卡(精确反查优先 ∪ 语义检索)。零命中 → 原样返回(不挂)。"""
-    # 精确反查:R1 citations 外规条款 → cited_regulations 命中案例(默认路径空 → [])
-    precise = cases_for_clauses(pg, [citation_key(c) for c in citations])
+    """R1 充分答复尾挂相关案例卡(精确反查优先 ∪ 语义检索)。零命中 → 原样返回(不挂)。
+
+    边界前置过滤 scope 内:精确反查按 PG 身份全表扫、不受 corpus/perm_tag 约束 → **关闭**
+    (否则调用方未请求 case 语料也会漏案例卡,破前置过滤红线);语义路 ``retrieve_cases``
+    已受 scope 约束(corpus 门 + perm_tag),照常保留。前端/CLI 无 scope → 两路皆走(byte 等价)。
+    """
+    # 精确反查:R1 citations 外规条款 → cited_regulations 命中案例(默认路径空 → [];边界 scope 内关闭)
+    precise = [] if scope_active() else cases_for_clauses(pg, [citation_key(c) for c in citations])
     # 语义:case 分区检索去重一案一卡
     sem_cands = _dedup_by_case(drop_degraded(retriever.retrieve_cases(query)))
     semantic = [c.doc_version_id for c in sem_cands]
