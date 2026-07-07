@@ -71,6 +71,36 @@ def test_bridge_consumed_when_present(monkeypatch):
     assert "b1" in [c.clause_id for c in res2.citations]
 
 
+def _boundary_scope(corpora):
+    """真 ``Retriever.scoped()`` 激活边界 scope contextvar(廉价 fake,不连栈)。"""
+    from query.config import QueryConfig
+    from query.retrieve.hybrid import Retriever
+
+    class _Embed:
+        def embed(self, texts):
+            return [SimpleNamespace(dense=[0.1], sparse={1: 1.0})]
+
+    class _Milvus:
+        def search(self, *a, **k):
+            return SimpleNamespace(hits=[], retrieval_mode="hybrid")
+
+    stub = Retriever(_Embed(), _Milvus(), QueryConfig(decompose=False, hyde=False))
+    return stub.scoped(corpora=corpora)
+
+
+def test_bridge_disabled_under_boundary_scope(monkeypatch):
+    # 边界 scope 内:桥接入口按 PG 身份把案例 cited_regulations 解析成外规条款、绕过前置过滤 → 关闭。
+    # 即便 resolve_cited_clauses 会返回 b1(见 consumed_when_present),scope 内也不得越界。
+    cands = [_cand("a1", "DV1", "第三条")]
+    anchors = {"a1": _cit("a1", "内规X", "第三条"), "b1": _cit("b1", "外规Y", "第十条")}
+    cases = [_cand("c1", "CASE1", None)]
+    _patch(monkeypatch, anchors, {"a1": "t", "b1": "t"}, bridge_ids=["b1"])
+    with _boundary_scope(("P-CASE",)):
+        res = answer_judgment("q", _Retr(cands, cases), pg=None, llm=None,
+                              qcfg=load_query_config())
+    assert [c.clause_id for c in res.citations] == ["a1"]   # 桥接被关 → 无越权外规引用
+
+
 def test_empty_refuses(monkeypatch):
     _patch(monkeypatch, {}, {}, bridge_ids=[])
     res = answer_judgment("q", _Retr([], cases=[]), pg=None, llm=None, qcfg=load_query_config())

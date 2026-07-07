@@ -30,8 +30,9 @@ router = APIRouter(tags=["boundary"])
 
 #: 边界 corpus_types → Milvus corpus_type 分区值(audit_project 未接入 → 422,见 ``_build_scope``)。
 _CORPUS_MAP = {"internal": "P-INT", "external": "P-EXT", "qa": "P-QA", "case": "P-CASE"}
-#: SSE ``error`` 事件码:查询热路径内部错误(服务向)。仿 ``B104`` 先例入 B1xx 服务向段;
-#: **待回灌** biz ``boundary.v1.yaml`` 错误码体系(契约单一源,见 PR 说明)。
+#: SSE ``error`` 事件码:查询热路径内部错误(服务向)。同 ``B104`` 属 B1xx 服务向段;
+#: 已在契约单一源登记(biz ``boundary.v1.yaml`` QueryErrorEvent + SPEC-BOUNDARY §3.3,
+#: audit-biz PR#6)。合并顺序:biz 登记先行 → 本仓照做。
 _ERR_INTERNAL = "B105"
 
 

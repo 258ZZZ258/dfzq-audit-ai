@@ -78,6 +78,16 @@ def _scope_superseded(scope: RetrievalScope | None, include_superseded: bool) ->
     return include_superseded
 
 
+def scope_active() -> bool:
+    """当前是否处于边界前置过滤 scope 内(边界二请求期为真;前端/CLI 为假)。
+
+    用于关掉**按 PG 身份精确取数、绕过 Milvus 前置过滤**的 widening 桥接(案例精确反查 /
+    R5 引用条款解析):前置过滤边界下按身份取的内容无法证明在 Java 授权集内,不得越界。
+    经 scope 的检索路(``retrieve*``)本身已带 corpus 门 + perm_tag,故不受此影响。
+    """
+    return _SCOPE.get() is not None
+
+
 def _collect(scope: RetrievalScope | None, cands: list[Candidate]) -> None:
     """把本路实际返回的候选写进收集槽(scope 未设/未带槽 → no-op,零开销)。"""
     if scope is not None and scope.collector is not None:

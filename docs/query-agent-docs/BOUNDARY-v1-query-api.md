@@ -82,9 +82,23 @@ schema 接入项目语料后一并放开(去掉 `_build_scope` 的守卫 + 加 `
 
 生成失败发 `{"code": "B105", "message": "生成失败"}`(不泄内部细节,堆栈进日志/trace)。
 
-> ⚠ **契约待批**:`B105`(查询热路径内部错误,服务向)沿用 `B104` 先例入 B1xx **服务向**段,
-> 但**尚未回灌** biz `boundary.v1.yaml` / v0.4 §8.3 错误码体系。按「契约改动先改 biz 的 yaml,本仓照做」,
-> 合并前需在 biz 侧登记该码(与 B104 同处理);biz 定稿码不同则本仓照改。
+> **契约已登记**:`B105`(查询热路径内部错误,服务向)同 `B104` 属 B1xx **服务向**段,已在契约单一源
+> 登记(biz `boundary.v1.yaml` QueryErrorEvent + `SPEC-BOUNDARY.md §3.3`,audit-biz PR#6)。
+> 合并顺序:biz 登记先行 → 本仓照做;biz 定稿码不同则本仓照改。回灌 v0.4 §8.3 为 biz 侧合并后待办。
+
+## 前置过滤覆盖:关掉按身份取数的 widening 桥接
+
+前置过滤红线要求**所有**回给 Java 的内容都在授权集内。经 scope 的检索路(`retrieve`/
+`retrieve_cases`/`retrieve_enumerate`)已带 corpus 门 + `perm_tag` 过滤;但内核另有两条**按 PG
+身份精确取数、绕过 Milvus 前置过滤**的 widening 桥接,边界 scope 激活时**一律关闭**(前端/CLI 无
+scope → 照走,byte 等价):
+
+- **案例精确反查**(`case/bridge.cases_for_clauses`,`attach_cases` 用):全表扫 `cases.cited_regulations`
+  按外规条款反查案例——scope 内关闭,否则调用方未请求/未授权 `case` 语料也会漏案例卡。
+- **R5 桥接入口**(`judge/r5_judgment.resolve_cited_clauses`):把案例 `cited_regulations` 解析成外规条款
+  chunk——scope 内关闭,否则漏出未受 corpus/`perm_tag` 约束的外规引用。
+
+门控由 `retrieve.hybrid.scope_active()` 统一判定(边界请求期为真)。
 
 ## 与前端接口的关系
 
