@@ -42,3 +42,6 @@ tools/doc_test/config.yaml
 
 # Codex 代码审查产物(.review/findings.json 随审查流程,不入库)
 .review/
+
+# 会话分析临时目录(误提交防复发)
+.tmp_transcript_analysis/

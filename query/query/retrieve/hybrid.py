@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from pipeline.config import load_config
@@ -24,6 +26,72 @@ from query.retrieve.sparse_boost import augment_sparse, load_scenario_terms
 
 #: 检索分区(§5.2):内规 / 外规各打各的配额
 _PARTITIONS = ("P-INT", "P-EXT")
+#: 主检索(R1/R5)可打的分区全集:边界 scope 含 qa 时加打 P-QA;P-CASE 走 ``retrieve_cases``。
+_MAIN_CORPORA = ("P-INT", "P-EXT", "P-QA")
+
+
+@dataclass(frozen=True)
+class RetrievalScope:
+    """边界层注入的检索前置过滤(boundary.v1.yaml:值由 Java 预计算,本层只作 Milvus filter 消费)。
+
+    ``collector`` 是调用方提供的候选收集槽:``retrieve*`` 把**实际返回**的候选 append 进去,
+    供边界层在同一次检索上派生 per-hit 分数(免二次检索、免候选集漂移)。
+    """
+
+    corpora: tuple[str, ...] | None = None
+    extra_expr: str | None = None
+    topk: int | None = None
+    partition_topk: int | None = None
+    include_superseded: bool | None = None
+    collector: list | None = None
+
+
+_SCOPE: contextvars.ContextVar[RetrievalScope | None] = contextvars.ContextVar(
+    "query_retrieval_scope", default=None
+)
+
+
+def _and_expr(left: str | None, right: str | None) -> str | None:
+    """两个 Milvus expr 合取;任一为空取另一个,双空 → None。"""
+    if left and right:
+        return f"{left} and {right}"
+    return left or right
+
+
+def _corpora_for(
+    scope: RetrievalScope | None, default: tuple[str, ...], allowed: tuple[str, ...]
+) -> tuple[str, ...]:
+    """分区路由单点规则(改语义只改这一处):scope 未设 → ``default``(既有行为 byte 等价);
+    已设 → 与 ``allowed`` 求交。``allowed`` = 该检索路支持的分区全集——主检索 ``_MAIN_CORPORA``
+    (qa scope 才加打 P-QA)、枚举 ``_PARTITIONS``(条款树列举仅内/外规,qa/case scope 下枚举
+    为空 → 上层覆盖拒答,**刻意语义**)、案例 ``("P-CASE",)``(scope 不含 case → 整路跳过)。
+    """
+    if scope is None or scope.corpora is None:
+        return default
+    return tuple(c for c in allowed if c in scope.corpora)
+
+
+def _scope_superseded(scope: RetrievalScope | None, include_superseded: bool) -> bool:
+    """scope 显式设定 ``include_superseded`` 时覆盖调用方缺省(边界契约位对**答案路径**生效)。"""
+    if scope is not None and scope.include_superseded is not None:
+        return scope.include_superseded
+    return include_superseded
+
+
+def scope_active() -> bool:
+    """当前是否处于边界前置过滤 scope 内(边界二请求期为真;前端/CLI 为假)。
+
+    用于关掉**按 PG 身份精确取数、绕过 Milvus 前置过滤**的 widening 桥接(案例精确反查 /
+    R5 引用条款解析):前置过滤边界下按身份取的内容无法证明在 Java 授权集内,不得越界。
+    经 scope 的检索路(``retrieve*``)本身已带 corpus 门 + perm_tag,故不受此影响。
+    """
+    return _SCOPE.get() is not None
+
+
+def _collect(scope: RetrievalScope | None, cands: list[Candidate]) -> None:
+    """把本路实际返回的候选写进收集槽(scope 未设/未带槽 → no-op,零开销)。"""
+    if scope is not None and scope.collector is not None:
+        scope.collector.extend(cands)
 
 
 def _build_hyde_llm(qcfg: QueryConfig):
@@ -98,6 +166,31 @@ class Retriever:
         # §9.3 观测 tracer(只读旁路):默认 NoopTracer 零开销;发 HyDE/子查询 event 到当前 trace
         self._tracer = tracer or NoopTracer()
 
+    @contextmanager
+    def scoped(
+        self,
+        *,
+        corpora: tuple[str, ...] | None = None,
+        extra_expr: str | None = None,
+        topk: int | None = None,
+        partition_topk: int | None = None,
+        include_superseded: bool | None = None,
+        collector: list | None = None,
+    ):
+        """请求内给所有 ``retrieve*`` 加 Milvus 前置过滤(contextvar 并发隔离,退出必复位)。
+
+        边界二(routes_boundary)入口:检索**前**生效(红线:算在 Java、用在 Python)。
+        ``collector`` 收集本请求实际返回的候选,供上层免二次检索派生分数。
+        """
+        token = _SCOPE.set(RetrievalScope(
+            corpora=corpora, extra_expr=extra_expr, topk=topk, partition_topk=partition_topk,
+            include_superseded=include_superseded, collector=collector,
+        ))
+        try:
+            yield
+        finally:
+            _SCOPE.reset(token)
+
     @classmethod
     def from_config(cls, qcfg: QueryConfig | None = None, *, tracer=None) -> Retriever:
         """连真栈:复用 pipeline embedding/milvus。``tracer`` 由 QueryAgent 注入(§9.3 观测)。"""
@@ -117,17 +210,25 @@ class Retriever:
         ``_subqueries_for`` 默认 ``[query]``(关/stub)→ 单查询、与既有 byte 等价;仅复合问句
         (decompose 拆 >1)才 fan-out。综合 = 候选并集(保最高分,覆盖各子约束),生成层零改。
         """
+        scope = _SCOPE.get()
+        include_superseded = _scope_superseded(scope, include_superseded)
         merged: dict[str, Candidate] = {}
         for subquery in self._subqueries_for(query):
             for cid, cand in self._search_candidates(
-                subquery, include_superseded=include_superseded
+                subquery,
+                include_superseded=include_superseded,
+                corpora=_corpora_for(scope, _PARTITIONS, _MAIN_CORPORA),
+                extra_expr=scope.extra_expr if scope else None,
+                partition_topk=scope.partition_topk if scope else None,
             ).items():
                 prev = merged.get(cid)
                 if prev is None or cand.score > prev.score:
                     merged[cid] = cand
         ranked = sorted(merged.values(), key=lambda c: c.score, reverse=True)  # RRF 序(none 终态)
         ranked = self._reranker.rerank(query, ranked)  # bge 重排对**原问**;none passthrough(等价)
-        return ranked[: self._qcfg.topk]
+        out = ranked[: (scope.topk if scope and scope.topk else self._qcfg.topk)]
+        _collect(scope, out)
+        return out
 
     def _subqueries_for(self, query: str) -> list[str]:
         """§3.3 N3:decompose 开+gateway → 复合问句拆子查询;否则/单跳/失败 → ``[query]``(直通)。"""
@@ -141,21 +242,32 @@ class Retriever:
         return subs
 
     def _search_candidates(
-        self, query: str, *, include_superseded: bool = False
+        self,
+        query: str,
+        *,
+        include_superseded: bool = False,
+        corpora: tuple[str, ...] = _PARTITIONS,
+        extra_expr: str | None = None,
+        partition_topk: int | None = None,
     ) -> dict[str, Candidate]:
-        """单子查询分区配额检索 → 合并去重(含 §3.1 HyDE / §5.4 sparse)。返回 chunk_id→候选。"""
+        """单子查询分区配额检索 → 合并去重(含 §3.1 HyDE / §5.4 sparse)。返回 chunk_id→候选。
+
+        ``corpora``/``extra_expr``/``partition_topk`` 由 ``retrieve`` 从 scope 解出;缺省与既有
+        行为 byte 等价(``extra_expr=None`` 即 ``milvus_io.search`` 自身缺省)。
+        """
         with_text = self._qcfg.rerank_backend != "none"  # 仅重排时取 Milvus text(零开销默认)
         emb = self._embed.embed([query])[0]
         dense = self._dense_for(query, emb)    # §3.1 HyDE(关/stub → emb.dense,byte 等价)
         sparse = self._sparse_for(query, emb)  # §5.4 提权/扩展(双关关 → emb.sparse,byte 等价)
         found: dict[str, Candidate] = {}
-        for corpus in _PARTITIONS:
+        for corpus in corpora:
             res = self._milvus.search(
                 dense,
                 sparse,
-                topk=self._qcfg.partition_topk,
+                topk=partition_topk or self._qcfg.partition_topk,
                 include_superseded=include_superseded,
                 corpus=corpus,
+                extra_expr=extra_expr,
                 with_text=with_text,
             )
             for hit in res.hits:
@@ -201,9 +313,12 @@ class Retriever:
         (``extra_expr`` 由 ``listing.build_milvus_expr`` 构,白名单字段)。不激进截断、不改 R1。
         分区配额合并去重(同 chunk_id 保高分)→ 按分降序取 ``enumerate_topk``。
         """
+        scope = _SCOPE.get()
+        include_superseded = _scope_superseded(scope, include_superseded)
+        extra_expr = _and_expr(scope.extra_expr if scope else None, extra_expr)
         emb = self._embed.embed([query])[0]
         merged: dict[str, Candidate] = {}
-        for corpus in _PARTITIONS:
+        for corpus in _corpora_for(scope, _PARTITIONS, _PARTITIONS):
             res = self._milvus.search(
                 emb.dense,
                 emb.sparse,
@@ -218,7 +333,9 @@ class Retriever:
                 if prev is None or cand.score > prev.score:
                     merged[cand.chunk_id] = cand
         ranked = sorted(merged.values(), key=lambda c: c.score, reverse=True)
-        return ranked[: self._qcfg.enumerate_topk]
+        out = ranked[: self._qcfg.enumerate_topk]
+        _collect(scope, out)
+        return out
 
     def retrieve_cases(self, query: str, *, include_superseded: bool = False) -> list[Candidate]:
         """§6.3 案例分区(P-CASE)语义检索 → 按分降序的 chunk 级候选(``partition_topk`` 条)。
@@ -227,6 +344,10 @@ class Retriever:
         故此处**不截 topk、不按 dvid 去重**,留足头部供上层去重后仍有足够 distinct 案例。
         ``status==effective`` 前置 + degraded 由上层 ``drop_degraded`` 剔除(沿用 R1 契约)。
         """
+        scope = _SCOPE.get()
+        if not _corpora_for(scope, ("P-CASE",), ("P-CASE",)):
+            return []  # scope 不含 case → 整路跳过(前置过滤,非检索后丢弃)
+        include_superseded = _scope_superseded(scope, include_superseded)
         emb = self._embed.embed([query])[0]
         res = self._milvus.search(
             emb.dense,
@@ -234,6 +355,9 @@ class Retriever:
             topk=self._qcfg.partition_topk,
             include_superseded=include_superseded,
             corpus="P-CASE",
+            extra_expr=scope.extra_expr if scope else None,
         )
         cands = [_to_candidate(hit, res.retrieval_mode) for hit in res.hits]
-        return sorted(cands, key=lambda c: c.score, reverse=True)
+        out = sorted(cands, key=lambda c: c.score, reverse=True)
+        _collect(scope, out)
+        return out

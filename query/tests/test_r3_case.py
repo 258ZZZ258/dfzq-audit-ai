@@ -151,3 +151,35 @@ def test_attach_precise_reverse_lookup_priority():
     cards = [json.loads(b.content) for b in res.answer_blocks if b.type is BlockType.CASE_CARD]
     assert cards[0]["doc_version_id"] == "DV2"   # 精确反查优先
     assert {c["doc_version_id"] for c in cards} == {"DV1", "DV2"}
+
+
+def _boundary_scope(corpora):
+    """真 ``Retriever.scoped()`` 激活边界 scope contextvar(廉价 fake embed/milvus,不连栈)。"""
+    from query.config import QueryConfig
+    from query.retrieve.hybrid import Retriever
+
+    class _Embed:
+        def embed(self, texts):
+            return [SimpleNamespace(dense=[0.1], sparse={1: 1.0})]
+
+    class _Milvus:
+        def search(self, *a, **k):
+            return SimpleNamespace(hits=[], retrieval_mode="hybrid")
+
+    stub = Retriever(_Embed(), _Milvus(), QueryConfig(decompose=False, hyde=False))
+    return stub.scoped(corpora=corpora)
+
+
+def test_attach_precise_disabled_under_boundary_scope():
+    # 边界 scope 内(未含 P-CASE):精确反查按 PG 身份全表扫、绕过前置过滤 → 关闭,不漏案例卡。
+    # 无 scope 时同样输入会附挂 DV2(见 test_attach_precise_reverse_lookup_priority),此处应 0。
+    res0 = _evidence_result()
+    retr = _FakeRetriever([])   # 语义零命中(此处只验精确反查路被关)
+    pg = _FakePg(
+        [_case_row("DV2", refs=[{"doc_no": "〔2024〕1号", "clause_path": "第三条"}])],
+        {"DV2": _dv("DV2", title="精确反查命中案")},
+    )
+    with _boundary_scope(("P-INT",)):
+        res = attach_cases(res0, "q", res0.citations, retr, pg, _QCFG)
+    assert _card_count(res) == 0                       # 精确反查被关 → 无越权案例卡
+    assert [b.content for b in res.answer_blocks] == ["依据答复"]

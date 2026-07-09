@@ -80,10 +80,17 @@ def resolve_cited_clauses(pg, case_dvids) -> list[str]:
 
 
 def answer_judgment(query, retriever, pg, llm, qcfg) -> QueryResult:
-    """§6.5:桥接入口 ∪ hybrid → 三段式(① 依据条款 ② 框定 ③ 标识)+ review_required。空→覆盖拒答。"""
+    """§6.5:桥接入口 ∪ hybrid → 三段式(① 依据条款 ② 框定 ③ 标识)+ review_required。空→覆盖拒答。
+
+    边界前置过滤 scope 内:桥接入口(``resolve_cited_clauses``)按 PG 身份把案例 cited_regulations
+    解析成外规条款、绕过 Milvus 前置过滤 → **关闭**(否则漏出未受 corpus/perm_tag 约束的外规引用);
+    hybrid 与 ``retrieve_cases`` 已受 scope 约束,照常。前端/CLI 无 scope → 桥接照走(byte 等价)。
+    """
+    from query.retrieve.hybrid import scope_active  # 懒导入,避免模块级拉 pipeline(§ r5 零栈)
+
     # ① 桥接入口(consumed-when-present)+ ② hybrid(内规+外规);degraded 就地剔除(契约)
     case_dvids = [c.doc_version_id for c in retriever.retrieve_cases(query) if c.doc_version_id]
-    bridge_ids = resolve_cited_clauses(pg, case_dvids)
+    bridge_ids = [] if scope_active() else resolve_cited_clauses(pg, case_dvids)
     hybrid_ids = [c.chunk_id for c in retriever.retrieve(query) if not c.degraded]
     ids = list(dict.fromkeys([*bridge_ids, *hybrid_ids]))[: qcfg.topk]  # 桥接优先,截 topk
 
