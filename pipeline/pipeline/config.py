@@ -63,20 +63,9 @@ class ObjectStoreConfig(BaseModel):
 
 
 class TogglesConfig(BaseModel):
-    l2_enabled: bool  # M1 默认 false(零 LLM)
+    # E1 义务预打标(零 LLM 正则)。LLM 富集(E2/L2/case_l2)已整段移除,相关开关随之删除。
     e1_enabled: bool
-    e2_enabled: bool = False  # E2 LLM 打标(事项/部门/实体类型);默认关 → 零 LLM
-    case_l2_enabled: bool = False  # 案例 L2(引用外规对齐 + 违规事由分类);默认关 → 零 LLM
     auto_confirm_meta_no_conflict: bool = False
-
-
-class LlmConfig(BaseModel):
-    """E2/L2 LLM 辅助(默认关)。key/base_url 走 env(OPENAI_API_KEY/OPENAI_BASE_URL),不入库。"""
-
-    model: str = "gpt-5.4-nano"  # ⚠ env OPENAI_MODEL 可覆盖;E2/L2/案例分类共用(高频→低成本档)
-    # ⚠ 案例 L2(T2.1 引用外规抽取+对齐=全管线最高价值字段)单独模型档;None → 回落 model
-    # (add-only:不设即沿用旧行为)。案例量小,整段 case_l2 上强推理档成本可忽略。
-    case_l2_model: str | None = None
 
 
 class AlignConfig(BaseModel):
@@ -138,10 +127,10 @@ class ProfileConfig(BaseModel):
     保证既有四 profile 与配置缺失场景行为零变更(对拍测试 test_preseg_profiles_seam)。
     """
 
-    sampling_rate: float  # 抽检率(l2_llm._sampled 消费)
     qc_indicators: list[str] | None = None  # S2 启用集(INDICATOR_REGISTRY 名);None=硬编码默认
     qc_threshold_overrides: dict[str, float] = {}  # 对 QcThresholds 字段的 per-profile 覆盖
-    case_ref_source: str = "llm"  # 案例引用来源:llm(case_l2 抽取)| structured(预切块直装)
+    # 案例引用来源:structured(预切块直装)| 其它值=自建通道规则抽取(零 LLM;case_l2 已移除)
+    case_ref_source: str = "rule"
 
 
 class Settings(BaseModel):
@@ -150,7 +139,6 @@ class Settings(BaseModel):
     embedding: EmbeddingConfig
     object_store: ObjectStoreConfig
     toggles: TogglesConfig
-    llm: LlmConfig = LlmConfig()
     align: AlignConfig
     parse: ParseConfig
     chunk: ChunkConfig
@@ -185,8 +173,6 @@ def _apply_env(raw: dict) -> None:
         emb["endpoint_model"] = env["PIPELINE_EMBEDDING_ENDPOINT_MODEL"]
     if "HF_HOME" in env:
         emb["cache_dir"] = env["HF_HOME"]
-    if "OPENAI_MODEL" in env:  # E2/L2 LLM 模型名 env 覆盖
-        raw.setdefault("llm", {})["model"] = env["OPENAI_MODEL"]
     os_ = raw.setdefault("object_store", {})
     if "PIPELINE_OBJECT_STORE_BACKEND" in env:
         os_["backend"] = env["PIPELINE_OBJECT_STORE_BACKEND"]
@@ -220,7 +206,6 @@ def load_config(config_dir: str | os.PathLike | None = None) -> Settings:
         embedding=EmbeddingConfig(**settings_raw["embedding"]),
         object_store=ObjectStoreConfig(**settings_raw["object_store"]),
         toggles=TogglesConfig(**settings_raw["toggles"]),
-        llm=LlmConfig(**settings_raw.get("llm", {})),
         align=AlignConfig(**settings_raw["align"]),
         parse=ParseConfig(**settings_raw["parse"]),
         chunk=ChunkConfig(**settings_raw["chunk"]),

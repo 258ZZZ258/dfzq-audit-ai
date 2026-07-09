@@ -1,5 +1,7 @@
 """T1 配置缝对拍:profiles.yaml 承载 QC 启用集/阈值覆盖/case_ref_source 后,
-四个既有 profile 行为与硬编码基线逐项一致(零变更回归保证,SPEC-PRESEG §6)。"""
+四个既有 profile 行为与硬编码基线逐项一致(零变更回归保证,SPEC-PRESEG §6)。
+
+注:业务域 L2(sampling_rate)随 case_l2/l2_llm 富集整段移除,相关对拍已删。"""
 
 from __future__ import annotations
 
@@ -24,7 +26,6 @@ LEGACY_SETS = {
     "P-QA": ["qa_pair_completeness", "page_anchor_complete", "text_quality"],
     "P-CASE": ["page_anchor_complete", "text_quality"],
 }
-LEGACY_SAMPLING = {"P-INT": 1.0, "P-EXT": 0.0, "P-QA": 0.0, "P-CASE": 0.0}
 
 
 def _names(fns: list) -> list[str]:
@@ -39,18 +40,14 @@ class TestParityWithLegacy:
         cfg = load_config()
         assert _names(ind.indicators_for(ct, cfg.profiles[ct])) == LEGACY_SETS[ct]
 
-    @pytest.mark.parametrize("ct", ["P-INT", "P-EXT", "P-QA", "P-CASE"])
-    def test_sampling_rate_unchanged(self, ct):
-        assert load_config().profiles[ct].sampling_rate == LEGACY_SAMPLING[ct]
-
     def test_unknown_corpus_no_profile_falls_back_all_seven(self):
         assert _names(ind.indicators_for("P-UNKNOWN", None)) == LEGACY_SETS["P-INT"]
         # 旧签名调用(不带 profile)不破——既有调用点/测试零改动
         assert _names(ind.indicators_for("P-QA")) == LEGACY_SETS["P-QA"]
 
     def test_profile_without_qc_indicators_falls_back_legacy(self):
-        # 只有 sampling_rate 的旧形态 ProfileConfig(向后兼容)→ 回退硬编码默认
-        legacy_shape = ProfileConfig(sampling_rate=0.5)
+        # 缺 qc_indicators 的 ProfileConfig → 回退硬编码默认
+        legacy_shape = ProfileConfig()
         assert _names(ind.indicators_for("P-QA", legacy_shape)) == LEGACY_SETS["P-QA"]
 
 
@@ -63,18 +60,17 @@ class TestConfigSeam:
         }
 
     def test_custom_indicator_list_respected(self):
-        p = ProfileConfig(sampling_rate=0.0, qc_indicators=["text_quality"])
+        p = ProfileConfig(qc_indicators=["text_quality"])
         assert _names(ind.indicators_for("P-ANY", p)) == ["text_quality"]
 
     def test_unknown_indicator_name_fails_fast(self):
-        p = ProfileConfig(sampling_rate=0.0, qc_indicators=["no_such_indicator"])
+        p = ProfileConfig(qc_indicators=["no_such_indicator"])
         with pytest.raises(ValueError, match="no_such_indicator"):
             ind.indicators_for("P-ANY", p)
 
     def test_threshold_override_applied(self, minimal_ir):
         cfg = load_config()
         p = ProfileConfig(
-            sampling_rate=0.0,
             qc_indicators=["page_anchor_complete"],
             qc_threshold_overrides={"page_anchor_complete_min": 0.0},
         )
@@ -86,7 +82,6 @@ class TestConfigSeam:
         cfg = load_config()
         base = cfg.qc.page_anchor_complete_min
         p = ProfileConfig(
-            sampling_rate=0.0,
             qc_indicators=["page_anchor_complete"],
             qc_threshold_overrides={"page_anchor_complete_min": 0.0},
         )
@@ -94,9 +89,9 @@ class TestConfigSeam:
         assert cfg.qc.page_anchor_complete_min == base  # 副本覆盖,不改全局
 
     def test_case_ref_source_defaults(self):
-        cfg = load_config()
-        assert ProfileConfig(sampling_rate=0.0).case_ref_source == "llm"
-        assert cfg.profiles["P-CASE"].case_ref_source == "llm"  # 现状:LLM 通道
+        # case_l2 LLM 通道移除后,默认走规则抽取("rule");仅 P-PRESEG 显式 structured。
+        assert ProfileConfig().case_ref_source == "rule"
+        assert load_config().profiles["P-PRESEG"].case_ref_source == "structured"
 
     def test_evaluate_without_profile_is_legacy(self, minimal_ir):
         cfg = load_config()

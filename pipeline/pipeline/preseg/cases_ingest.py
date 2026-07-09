@@ -109,20 +109,20 @@ def _iso_date(value: str | None):
         return None
 
 
-# ── T9:结构化直装完整链(替代 L1 正则 + case_l2 LLM 引用抽取)──────────────
+# ── T9:结构化直装完整链(替代 L1 正则案例抽取;case_l2 LLM 通道已整段移除)──────────────
 
 
 def use_structured_case(dv, profiles: dict) -> bool:
     """分派条件(B8 配置缝):preseg 案例且 P-PRESEG 档案 case_ref_source=='structured'。
 
-    翻回 'llm' 即退回既有 L1(+case_l2)路径——机制保留不物理删除。
+    非 'structured' 值 → 退回自建通道规则抽取(``s4_meta._extract_case``,零 LLM;case_l2 已移除)。
     """
     prof = profiles.get("P-PRESEG")
     return (
         dv is not None
         and dv.source_format == "preseg"
         and prof is not None
-        and getattr(prof, "case_ref_source", "llm") == "structured"
+        and getattr(prof, "case_ref_source", "rule") == "structured"
     )
 
 
@@ -134,8 +134,8 @@ def extract_case_structured(ctx: StageContext, dv: DocVersion) -> None:
     照旧仅置 ``ref_unresolved`` 标记不阻塞(§9 现状口径)。persons 原样照存(D6)。
     respondent 单值列 = persons 首条(兼容既有消费面);全量在 persons。
     """
-    from pipeline.meta.case_l2 import PgRegLookup
     from pipeline.meta.case_ref_align import align_cited
+    from pipeline.meta.reg_lookup import PgRegLookup
 
     rec = json.loads(ctx.object_store.get(dv.raw_object_key).decode("utf-8"))
     cited_in = [

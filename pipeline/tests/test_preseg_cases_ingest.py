@@ -74,10 +74,9 @@ def ingested(env, monkeypatch):
     def _boom(*a, **k):  # noqa: ANN002, ANN003
         raise AssertionError("preseg 结构化直装不得触达 LLM/L1 抽取通道")
 
-    from pipeline.meta import case_extract, case_l2
+    from pipeline.meta import case_extract
 
-    monkeypatch.setattr(case_l2, "apply", _boom)
-    monkeypatch.setattr(case_l2, "extract_cited", _boom)
+    # case_l2(LLM 案例富集)已整段移除;仅留规则抽取哨兵(结构化直装不得触达)
     monkeypatch.setattr(case_extract, "extract_case", _boom)
 
     case_dvids = {

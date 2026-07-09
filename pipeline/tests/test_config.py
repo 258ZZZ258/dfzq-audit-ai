@@ -16,12 +16,10 @@ def test_load_config_defaults():
     assert c.chunk.target_token_min < c.chunk.target_token_max
     assert c.milvus.upsert_batch == 500
     assert c.milvus.collection == "audit_corpus"
-    # M1 默认零 LLM
-    assert c.toggles.l2_enabled is False
+    # E1 默认开(零 LLM);LLM 富集(E2/L2/case_l2)已整段移除,相关开关不复存在
+    assert c.toggles.e1_enabled is True
     assert c.embedding.mode in ("local", "endpoint")
-    # profiles 抽检率字段保留(不消费)
     assert "P-INT" in c.profiles and "P-EXT" in c.profiles
-    assert c.profiles["P-INT"].sampling_rate == 1.0
     # M2 验证组件阈值(T2/T4)
     assert c.verify.t2_synthetic_query_head_chars == 30
     assert c.verify.t2_hit_at == 50

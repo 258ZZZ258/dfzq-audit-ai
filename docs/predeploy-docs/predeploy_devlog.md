@@ -116,3 +116,21 @@ dev/运维,仅**生产构建剔除入口**(减小人操作面/攻击面),不做�
   真栈跑通 47 passed(含 E2 部门打标集成)。
 - **消费方(E2 部门 / case_l2 违规打标)代码保留**——默认关、无值即降级;**未retire 打标能力**(如需
   彻底退役是更大改)。dict 表 + `get_issuers`/`get_departments`/`get_violation_types` 访问器 add-only 留存(休眠)。
+
+## 2026-07-09 全拆自建反推通道 + LLM 富集(preseg-only)
+
+甲方预结构化 → "爬取→LLM 反推→打标"自建通道弃用,生产走 preseg-only。用户决策"全拆(连富集也移除)"。
+
+- **删**:3 模块 `enrich/e2_tag` · `meta/l2_llm` · `meta/case_l2`;3 反推工具 `tools/doc_test/{classify,
+  gen_manifest,bootstrap_dicts}`;4 测试(test_e2_tag/l2_llm/case_l2 + query/test_cited_regulations_bridge_contract)。
+- **改**:`s4_meta` 变纯规则(去 `_safe_biz_l2`/`case_l2.apply`,留 l1_rules/case_extract);`cli._structuring`
+  去 E2 wiring + `_safe_e2`;`config` 去 e2/l2/case_l2 toggles + `[llm]` 段 + `LlmConfig`(query 用自己的
+  llm 配置);`profiles` 去 `sampling_rate`,`case_ref_source` 默认改 `rule`(非 structured=规则抽取)。
+- **保留**:E1 义务(零 LLM 正则)· preseg cases_ingest(结构化案例)· `llm_client.py`(**query gateway 仍用,
+  不删**)· `case_ref_align`(纯逻辑)· 查询侧全部 LLM 节点(R1/N0/N1/N3/R5)。
+- **踩坑钉子(会再踩)**:`PgRegLookup`(零 LLM 的 PG 外规查询工具,`RegLookup` 协议实现)原在 case_l2,
+  但 **preseg `cases_ingest.extract_case_structured` 函数内懒导入它**——顶层 import 扫描漏掉,删 case_l2 后
+  preseg_e2e 才炸(`ModuleNotFoundError`)。→ 移到新 `meta/reg_lookup.py`(纯 PG,与 case_ref_align 协议同伴)。
+  **教训:删模块前 grep 要带函数内懒导入(`grep 'import.*<mod>'` 全仓,非仅顶层)。**
+- **验证**:`--collect-only` 全仓 1006 tests / 0 收集错;真栈 150+ passed(config/s4_meta/preseg_e2e/
+  orchestrator/e1/web/cases_ingest…);ruff 绿。全仓模型门留合并前。
