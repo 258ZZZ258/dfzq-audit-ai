@@ -66,3 +66,53 @@
 - 真网关 wire 细节按具体框架(TEI 分 `/embed`+`/embed_sparse` 双端点 / Xinference / vLLM)可能需
   微调字段映射——当前**通用契约 + 字段可配**,拿到真端点文档后锁默认值即可。
 - 端点侧超时/重试/限流的生产级退避策略(当前复用既有指数退避)待真栈压测标定。
+
+## 2026-07-09 生产构建剔除人操作面入口(demo/demo-web,方案 A)
+
+audit-ai 生产 = Java 之后无身份·无状态端点,不需人操作的 CLI/Web 工作台。**方案 A**:代码保留供
+dev/运维,仅**生产构建剔除入口**(减小人操作面/攻击面),不做重构删除(方案 B 前置=先定人工队列/
+元数据确认/验证在生产由谁驱动,未定)。
+
+- **机制**:`pipeline/pyproject.toml` 声明 `dynamic = ["scripts"]`(移除静态 `[project.scripts]`)+
+  `pipeline/setup.py` 按 env 条件注入 console_scripts:默认(dev)注册 `demo`/`demo-web`;
+  `PIPELINE_BUILD_PROFILE=production`(构建/安装期设)→ **不注册任何 console_scripts**。
+- **验证**(不碰共享 venv):`pip wheel ./pipeline --no-deps --no-build-isolation` 建两份 wheel 查
+  `entry_points.txt`——dev 含 demo/demo-web,production 无 `entry_points.txt`。
+- **生产 ops 兜底**:CLI/Web 代码在;确需临时运维仍可 `python -m pipeline.cli` / `python -m pipeline.web.app`
+  (二者 `__main__` 已在)。
+- **构建命令**:`PIPELINE_BUILD_PROFILE=production pip wheel pipeline/ --no-deps`(生产 wheel,无入口);
+  `pip install -e pipeline`(dev,含入口)。
+- **非显然**:改动只影响未来构建/安装;**现有共享 venv 的 `demo` 不受影响**(旧元数据仍在),
+  勿在共享 venv 重装做验证(会改全体 worktree 的入口)。
+- **叶子面前提**:核心(编排/stage/域函数)零反向依赖 cli/web(仅测试 + 入口引用),故剔除入口不伤核心;
+  但 `cli.py` 内嵌驱动/收尾逻辑(`_drive_batch`/`_finalize_*`/`_approve_doc`/`reprocess_to_indexed`)
+  未下沉域模块 → 方案 B 真删前须先抽取。
+
+## 2026-07-09 字典精简:裁 issuers/departments/violation_types(甲方预结构化冗余)
+
+甲方知识库(《法规制度平台表头整理.xlsx》)已把 `业务类别/适用对象/发文单位/发文部门/法律位阶/案例类型`
+预结构化 → 我方原为"打标约束空间"的字典大面积落空。逐字典评估(见对话)后裁 3 留 2 待定 2:
+
+- **保留**:`dict_biz_domains` / `dict_entity_types`——查询侧真正的**标量过滤维度**(R4
+  `_ALLOWED_EXPR_FIELDS = {chunk_type, biz_domain, entity_type, perm_tag}`);值本就从 manifest 流到
+  chunk(不经字典),字典只作查询词表。`dict_aliases` 保留(口语简称→canonical,与甲方数据无关)。
+- **裁**:`dict_issuers` / `dict_departments` / `dict_violation_types`。
+- **待定**:`dict_aliases`(留了)/ `dict_scenario_terms`(独立查询增强,默认关,未动)。
+
+### 为什么可裁(关键判据)
+
+- **富集默认全关**(E2/L2/case_l2)→ 字典的"打标白名单"职责本就休眠;preseg 结构化案例还**绕过 case_l2**。
+- **issuer_level 空转**:`corpus_rows._issuer_level` 从 `dict_issuers` 派生 chunk.issuer_level,但
+  **查询侧零消费**(R4 不过滤 issuer_level,同 perm_tag"写而不用")→ 整条 dict_issuers→issuer_level 链
+  空转,裁掉只让 issuer_level 恒 0,功能零影响。真做分层检索时 issuer_level 应取自甲方**法律位阶**
+  (`issuer_level_src`→INT8,preseg 遗留),非我方 3 档 demo 字典。
+
+### 改动(add-only:停 seed + 去派生,**不删表/列**)
+
+- `pg_io.seed_dicts`:只 seed biz_domains/entity_types/aliases;删 issuers/departments/violation_types。
+- `corpus_rows`:删 `_issuer_level`/`_ISSUER_LEVEL_RANK`,`issuer_level = 0`(前瞻字段注释)。
+- 删 3 个 seed CSV;`tools/doc_test/bootstrap_dicts.py` 不再自举 issuers/violation(否则重建已删 CSV)。
+- 测试:`test_pg_io`/`test_seeds_p0` 改断言;`test_e2_tag` **自带最小 dept seed**(自包含,不靠全局 seed)。
+  真栈跑通 47 passed(含 E2 部门打标集成)。
+- **消费方(E2 部门 / case_l2 违规打标)代码保留**——默认关、无值即降级;**未retire 打标能力**(如需
+  彻底退役是更大改)。dict 表 + `get_issuers`/`get_departments`/`get_violation_types` 访问器 add-only 留存(休眠)。

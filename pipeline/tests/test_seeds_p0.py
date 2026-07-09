@@ -44,17 +44,11 @@ def test_dict_alias_schema_pin():
     )
 
 
-# ── 集成:seed 加载两张新字典(违规类别 v0-draft + 别名)──────────────────
-def test_seed_loads_violation_and_aliases(pg):
+# ── 集成:seed 加载别名字典(dict_violation_types 已裁,不再 seed)──────────────────
+def test_seed_loads_aliases(pg):
     counts = pg.seed_dicts(REPO / "seeds")
-    assert counts["violation_types"] >= 1
+    assert "violation_types" not in counts  # 已裁,不再 seed
     assert counts["aliases"] >= 1
-    # 不硬编码具体版本串(564fb55 换 CSV 版本号后此断言恒假,被旧栈残留数据掩盖至干净栈才暴露):
-    # 意图 = seed 正确落 dict_version 列 → 断言全部行带非空 v0-draft 系版本。
-    assert all(
-        v.dict_version and v.dict_version.startswith("v0-draft")
-        for v in pg.get_violation_types()
-    )
     assert len(pg.get_aliases()) >= 1
     # R4「别名→文号」列的**透传保真**断言(CSV 有则库有、CSV 无不虚构)。不再硬编码"≥1 条带文号":
     # 564fb55 起 demo 自举别名表 70 行全无 canonical_doc_number(数据策展事实,R4 该路径

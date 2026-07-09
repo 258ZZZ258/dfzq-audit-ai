@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, select, text
 from ulid import ULID
 
-from common.pg_models import Chunk, ClauseTag, Document, DocVersion, ImportBatch
+from common.pg_models import Chunk, ClauseTag, DictDepartment, Document, DocVersion, ImportBatch
 from pipeline import cli
 from pipeline.config import load_config
 from pipeline.enrich import e2_tag as e2
@@ -118,6 +118,8 @@ def seeded(pg_ctx):
         ("第一章 总则", True),
     ]
     with pg.session() as s:
+        # dict_departments 已裁(不再全局 seed)→ E2 部门打标测试自带最小部门字典(自包含)
+        s.merge(DictDepartment(code="DPT_E2T", name="合规部"))
         s.add(ImportBatch(batch_id=bid, source_dir="x"))
         s.add(Document(logical_id=lid, corpus_type="P-INT"))
         s.flush()
@@ -146,6 +148,7 @@ def seeded(pg_ctx):
         s.execute(delete(DocVersion).where(DocVersion.doc_version_id == dvid))
         s.execute(delete(Document).where(Document.logical_id == lid))
         s.execute(delete(ImportBatch).where(ImportBatch.batch_id == bid))
+        s.execute(delete(DictDepartment).where(DictDepartment.code == "DPT_E2T"))
 
 
 def _e2_tags(pg, dvid):

@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, text
 from ulid import ULID
 
 from common.pg_models import (
-    DictIssuer,
+    DictBizDomain,
     Document,
     DocVersion,
     ImportBatch,
@@ -60,15 +60,16 @@ def doc_version(pg):
 
 def test_seed_dicts(pg):
     counts = pg.seed_dicts(REPO / "seeds")
-    assert counts["issuers"] >= 1 and counts["biz_domains"] >= 1
-    assert counts["entity_types"] >= 1 and counts["departments"] >= 1
-    # 透传保真:CSV 首行 code→name 落库一致。不硬编码 code(564fb55 换 CSV code 系
-    # CSRC→ISS01 后旧断言恒 None,被旧栈残留行掩盖至干净栈才暴露)。
+    # 仅保留字典 seed(issuers/departments/violation_types 已裁)
+    assert counts["biz_domains"] >= 1 and counts["entity_types"] >= 1
+    assert counts["aliases"] >= 1
+    assert "issuers" not in counts and "departments" not in counts
+    # 透传保真:CSV 首行 code→name 落库一致(改验保留的 biz_domains)。
     import csv as _csv
 
-    with (REPO / "seeds" / "dict_issuers.csv").open(encoding="utf-8") as f:
+    with (REPO / "seeds" / "dict_biz_domains.csv").open(encoding="utf-8") as f:
         first = next(_csv.DictReader(f))
-    row = pg.get(DictIssuer, first["code"])
+    row = pg.get(DictBizDomain, first["code"])
     assert row is not None and row.name == first["name"]
 
 

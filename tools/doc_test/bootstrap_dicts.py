@@ -1,13 +1,13 @@
 """Demo 字典自举(Phase 2,扩展 doc_test):从策展样本用 LLM(Flash)反推约束字典。
 
 无甲方业务配合时,从本语料反推 demo 字典(v0-draft-demo,**仍需甲方评审**才能转正)。聚焦本语料
-**强信号**四类(schema 严格对齐 seeds,见 ``pg_io.seed_dicts`` 消费):
-- ``dict_violation_types``(code,name,dict_version)← 案例正文聚类违规事由(case_l2 T2.2 约束)
-- ``dict_issuers``(code,name,issuer_level)← 外规题名抽发文机构(manifest issuer_level)
+**强信号**(schema 严格对齐 seeds,见 ``pg_io.seed_dicts`` 消费):
 - ``dict_aliases``(alias,canonical_doc_number,canonical_title,dict_version)← 外规简称(case_l2 T2.1 对齐)
 - ``dict_biz_domains``(code,name,parent_code)← 外规/案例主题(L2 业务域约束)
 
 ``entity_types``/``departments`` 是券商内部分类、外规+案例弱信号 → 沿用现有 v0-draft seed(不覆盖)。
+``dict_issuers`` / ``dict_violation_types`` **已裁**(甲方预结构化冗余;issuer_level 空转)→ 不再自举
+(``bootstrap_issuers`` / ``bootstrap_violations`` 保留为死代码,待整段清理时移除)。
 纪律:JSON 输出(含 "json" + 示例);受限聚类、不臆造编码。模型默认 deepseek-v4-flash。
 
 跑法:.venv/bin/python tools/doc_test/bootstrap_dicts.py \
@@ -166,15 +166,12 @@ def main() -> None:
     sd = Path(args.seeds)
     print(f"自举字典:案例 {len(cases)} · 外规 {len(exts)}(model={args.model}, dry={args.dry_run})")
 
-    _write(sd / "dict_violation_types.csv", bootstrap_violations(client, cases),
-           ["code", "name", "dict_version"], args.dry_run)
-    _write(sd / "dict_issuers.csv", bootstrap_issuers(client, exts),
-           ["code", "name", "issuer_level"], args.dry_run)
+    # dict_issuers / dict_violation_types 已裁(不再 seed;甲方预结构化冗余)→ 不再自举,避免重建已删 CSV。
     _write(sd / "dict_aliases.csv", bootstrap_aliases(client, exts),
            ["alias", "canonical_doc_number", "canonical_title", "dict_version"], args.dry_run)
     _write(sd / "dict_biz_domains.csv", bootstrap_domains(client, cases + exts),
            ["code", "name", "parent_code"], args.dry_run)
-    print("\n(entity_types/departments 沿用现有 v0-draft seed,未覆盖)")
+    print("\n(entity_types/departments 沿用现有 v0-draft seed;issuers/violation_types 已裁,未生成)")
 
 
 if __name__ == "__main__":
