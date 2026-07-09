@@ -30,7 +30,13 @@ endpoint_sparse_field = "sparse_embedding"  # ⚠ 响应 sparse 字段(dict{toke
 endpoint_timeout = 60.0              # ⚠ 单请求超时(秒)
 
 [object_store]
-root = "./_objectstore"
+backend = "local"               # local(本地 FS)| minio(S3 兼容;上传/内网部署)
+root = "./_objectstore"         # local 后端根目录
+# ── backend="minio"(creds 走 env MINIO_ACCESS_KEY/SECRET_KEY,绝不入库)──
+# env:PIPELINE_OBJECT_STORE_BACKEND / MINIO_ENDPOINT / MINIO_BUCKET / MINIO_SECURE
+# minio_endpoint = "127.0.0.1:9000"
+# minio_bucket = "audit-uploads"
+minio_secure = false            # https?
 
 [toggles]
 l2_enabled = false              # L2 业务域 LLM 打标(§7.1,T2.3);默认关,开时经 env 提供 OPENAI_API_KEY

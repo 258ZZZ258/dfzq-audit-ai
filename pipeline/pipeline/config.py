@@ -54,7 +54,12 @@ class EmbeddingConfig(BaseModel):
 
 
 class ObjectStoreConfig(BaseModel):
-    root: str
+    root: str  # local 后端根目录
+    backend: Literal["local", "minio"] = "local"  # env PIPELINE_OBJECT_STORE_BACKEND
+    # ── backend=minio(S3 兼容;上传/内网部署)。creds 走 env MINIO_ACCESS_KEY/SECRET_KEY,绝不入库 ──
+    minio_endpoint: str | None = None  # env MINIO_ENDPOINT(host:port)
+    minio_bucket: str | None = None  # env MINIO_BUCKET
+    minio_secure: bool = False  # https?;env MINIO_SECURE
 
 
 class TogglesConfig(BaseModel):
@@ -182,6 +187,15 @@ def _apply_env(raw: dict) -> None:
         emb["cache_dir"] = env["HF_HOME"]
     if "OPENAI_MODEL" in env:  # E2/L2 LLM 模型名 env 覆盖
         raw.setdefault("llm", {})["model"] = env["OPENAI_MODEL"]
+    os_ = raw.setdefault("object_store", {})
+    if "PIPELINE_OBJECT_STORE_BACKEND" in env:
+        os_["backend"] = env["PIPELINE_OBJECT_STORE_BACKEND"]
+    if "MINIO_ENDPOINT" in env:
+        os_["minio_endpoint"] = env["MINIO_ENDPOINT"]
+    if "MINIO_BUCKET" in env:
+        os_["minio_bucket"] = env["MINIO_BUCKET"]
+    if "MINIO_SECURE" in env:
+        os_["minio_secure"] = env["MINIO_SECURE"]  # "0"/"1" → pydantic bool 强转
 
 
 def load_config(config_dir: str | os.PathLike | None = None) -> Settings:
