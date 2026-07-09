@@ -37,12 +37,20 @@ class MilvusConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     mode: Literal["local", "endpoint"]
     model_name: str
-    batch_size: int  # ⚠
-    max_length: int  # ⚠
-    retries: int  # ⚠ 指数退避次数
+    batch_size: int  # ⚠(endpoint 模式:每请求 input 条数)
+    max_length: int  # ⚠(仅 local 分词截断;endpoint 由服务端处理)
+    retries: int  # ⚠ 指数退避次数(local/endpoint 共用)
     cache_dir: str | None = None  # HF_HOME(env 注入,离线缓存)
-    endpoint_base_url: str | None = None  # OPENAI_BASE_URL(env)
-    endpoint_api_key: str | None = None  # OPENAI_API_KEY(env)
+    # ── endpoint 模式(BGE 系远程 dense+sparse 契约;字段/路径可配以适配 TEI/Xinference/vLLM 等)──
+    # base_url/api_key 走 env(内网嵌入服务常与 LLM 服务分离:PIPELINE_EMBEDDING_BASE_URL 优先)。
+    endpoint_base_url: str | None = None  # OPENAI_BASE_URL / PIPELINE_EMBEDDING_BASE_URL(env)
+    endpoint_api_key: str | None = None  # OPENAI_API_KEY / PIPELINE_EMBEDDING_API_KEY(env,绝不入库)
+    endpoint_path: str = "/embeddings"  # ⚠ base_url 后拼接路径
+    endpoint_model: str | None = None  # ⚠ 请求 model 名(网关注册名);None → 回落 model_name
+    endpoint_dense_field: str = "embedding"  # ⚠ 响应逐条 dense 向量字段名
+    # ⚠ 响应 sparse 字段名;值兼容 {token_id:权重} dict 或 [{index,value}] 列表(TEI 风)
+    endpoint_sparse_field: str = "sparse_embedding"
+    endpoint_timeout: float = 60.0  # ⚠ 单请求超时(秒)
 
 
 class ObjectStoreConfig(BaseModel):
@@ -162,8 +170,14 @@ def _apply_env(raw: dict) -> None:
         emb["model_name"] = env["PIPELINE_EMBEDDING_MODEL"]
     if "OPENAI_BASE_URL" in env:
         emb["endpoint_base_url"] = env["OPENAI_BASE_URL"]
+    if "PIPELINE_EMBEDDING_BASE_URL" in env:  # 专用,优先于 OPENAI_BASE_URL(嵌入服务常独立部署)
+        emb["endpoint_base_url"] = env["PIPELINE_EMBEDDING_BASE_URL"]
     if "OPENAI_API_KEY" in env:
         emb["endpoint_api_key"] = env["OPENAI_API_KEY"]
+    if "PIPELINE_EMBEDDING_API_KEY" in env:  # 专用嵌入端点 key,优先于 OPENAI_API_KEY(绝不入库)
+        emb["endpoint_api_key"] = env["PIPELINE_EMBEDDING_API_KEY"]
+    if "PIPELINE_EMBEDDING_ENDPOINT_MODEL" in env:  # 网关注册的嵌入 model 名
+        emb["endpoint_model"] = env["PIPELINE_EMBEDDING_ENDPOINT_MODEL"]
     if "HF_HOME" in env:
         emb["cache_dir"] = env["HF_HOME"]
     if "OPENAI_MODEL" in env:  # E2/L2 LLM 模型名 env 覆盖

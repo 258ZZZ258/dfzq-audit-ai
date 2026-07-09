@@ -1,9 +1,13 @@
-"""嵌入客户端:抽象接口 + 本地 BGEM3 实现(dense+sparse 一次产出)+ endpoint env 桩。
+"""嵌入客户端:抽象接口 + 本地 BGEM3 实现(dense+sparse 一次产出)+ BGE 系远程 endpoint。
 
 本地用 FlagEmbedding ``BGEM3FlagModel``:一次 ``encode`` 同出 dense(归一,1024 维)+ sparse
 (``lexical_weights``,token_id→权重)。模型**懒加载**(首次 embed 时载;首跑从 HF 下载 ~2GB)。
 batch_size / max_length / retries 全部从 config(⚠)。指数退避重试编码调用。
-endpoint(OpenAI 兼容)留 env 桩:M1 不要求跑(且仅 dense,无 BGE-M3 的单次 dense+sparse 语义)。
+
+``EndpointClient``(``mode=endpoint``):BGE 系远程嵌入端点,一次请求同拿 dense+sparse,保留混合
+检索(**非** OpenAI dense-only;甲方内网部署对齐)。请求/响应字段可配(``endpoint_dense_field`` /
+``endpoint_sparse_field`` / ``endpoint_path``),适配 TEI/Xinference/vLLM 等常见 BGE serving。摄取
+与查询两侧共用 ``from_config`` → 同一 mode 保证向量同空间。
 
 sparse 的 token_id→SPARSE_FLOAT_VECTOR 转换属 C5(milvus_io);本层只产出原始 lexical_weights。
 """
@@ -15,6 +19,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
 
 from pipeline.config import EmbeddingConfig, Settings
 
@@ -91,22 +97,96 @@ class LocalBGEM3Client(EmbeddingClient):
         ]
 
 
-class EndpointClient(EmbeddingClient):
-    """OpenAI 兼容 endpoint 桩:M1 不实现(SPEC:endpoint 保留在接口后,M1 不要求跑通)。
+def _normalize_sparse(raw: Any) -> dict[str, float]:
+    """归一 sparse 到 ``{token_id(str): 权重}``(与 ``Embedding.sparse`` / milvus_io 契约一致)。
 
-    **构造即失败(fail-fast)**:``embedding.mode`` 是 config 合法值(``Literal["local","endpoint"]``),
-    ``from_config`` 会据此选到本类。若仅在 ``embed()`` 抛错,切到 endpoint 后要先白跑 S0–S4,直到 S5
-    嵌入那一刻才崩(且报错很弱)。故在 ``__init__`` 即抛带指引的错误——``_worker_context()`` /
-    ``from_config`` 一构造客户端(search / meta confirm / ingest 命令开头)就清晰失败。
-    (ABC 要求 ``embed`` 有实现,否则实例化先抛 ``TypeError`` 盖过此处;故保留下方不可达的 ``embed``。)
-    M2 接 endpoint(OpenAI 兼容,仅 dense)时把真实现填入即可。
+    兼容两形态:``{token_id: 权重}`` dict(BGE native / Xinference)与 ``[{index, value}]`` 列表
+    (TEI ``/embed_sparse`` 风)。缺失/空 → ``{}``(下游混合查已有 sparse 空 → dense-only 兜底)。
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): float(v) for k, v in raw.items()}
+    if isinstance(raw, list):  # [{"index": int, "value": float}, ...]
+        out: dict[str, float] = {}
+        for item in raw:
+            if isinstance(item, dict) and "index" in item and "value" in item:
+                out[str(item["index"])] = float(item["value"])
+        return out
+    return {}
+
+
+def _extract_rows(data: Any, n: int) -> list[dict]:
+    """从响应取逐条结果(``data`` 或 ``embeddings`` 或裸列表),按 ``index`` 排序,校验条数。"""
+    rows = data.get("data") or data.get("embeddings") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        raise ValueError(f"endpoint 响应无法解析出结果列表:{type(rows).__name__}")
+    if len(rows) != n:
+        raise ValueError(f"endpoint 响应条数不符:请求 {n} 得 {len(rows)}")
+    if all(isinstance(r, dict) and "index" in r for r in rows):
+        rows = sorted(rows, key=lambda r: r["index"])  # 服务端乱序 → 按 index 恢复入参序
+    return rows
+
+
+class EndpointClient(EmbeddingClient):
+    """BGE 系远程嵌入端点(dense+sparse 一次产出;字段/路径可配)。
+
+    请求 ``POST {base_url}{endpoint_path}``:``{model, input:[...], return_dense, return_sparse}``。
+    逐条取 ``endpoint_dense_field`` 为 dense、``endpoint_sparse_field`` 为 sparse(两形态归一)→
+    映射现有 ``Embedding`` → 下游 milvus_io / 混合检索 / 冷备零改。
+
+    **构造即失败(fail-fast)**:缺 ``endpoint_base_url`` 即抛(``from_config`` 一构造就在
+    search / ingest 命令开头清晰失败,而非埋到 S5 嵌入才崩)。``retries`` 复用指数退避;
+    ``batch_size`` 分批(每请求 input 条数)。``_post`` 为 HTTP 接缝(单测 monkeypatch)。
     """
 
     def __init__(self, cfg: EmbeddingConfig) -> None:
-        raise NotImplementedError(
-            "embedding.mode=endpoint 在 M1 未实现(仅 mode=local 跑本地 BGE-M3 dense+sparse)。"
-            '请在 config/settings.toml 设 [embedding] mode = "local"。'
-        )
+        if not cfg.endpoint_base_url:
+            raise ValueError(
+                "embedding.mode=endpoint 需 endpoint_base_url"
+                "(env PIPELINE_EMBEDDING_BASE_URL / OPENAI_BASE_URL 或 settings.toml 配置)"
+            )
+        self.cfg = cfg
+        self._url = cfg.endpoint_base_url.rstrip("/") + cfg.endpoint_path
+        self._model = cfg.endpoint_model or cfg.model_name
 
-    def embed(self, texts: list[str]) -> list[Embedding]:  # 不可达(__init__ 先抛);留以满足 ABC
-        raise NotImplementedError("endpoint 嵌入 M1 未实现;用 mode=local")
+    def _post(self, payload: dict) -> Any:
+        headers = {}
+        if self.cfg.endpoint_api_key:
+            headers["Authorization"] = f"Bearer {self.cfg.endpoint_api_key}"
+        resp = httpx.post(
+            self._url, headers=headers, json=payload, timeout=self.cfg.endpoint_timeout
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _embed_batch(self, batch: list[str]) -> list[Embedding]:
+        payload = {
+            "model": self._model,
+            "input": batch,
+            "return_dense": True,
+            "return_sparse": True,
+        }
+        data = _retry(lambda: self._post(payload), retries=self.cfg.retries)
+        rows = _extract_rows(data, len(batch))
+        out: list[Embedding] = []
+        for r in rows:
+            dense = r.get(self.cfg.endpoint_dense_field)
+            if dense is None:
+                raise ValueError(f"endpoint 响应缺 dense 字段 {self.cfg.endpoint_dense_field!r}")
+            out.append(
+                Embedding(
+                    dense=[float(x) for x in dense],
+                    sparse=_normalize_sparse(r.get(self.cfg.endpoint_sparse_field)),
+                )
+            )
+        return out
+
+    def embed(self, texts: list[str]) -> list[Embedding]:
+        if not texts:
+            return []
+        bs = max(1, self.cfg.batch_size)
+        out: list[Embedding] = []
+        for i in range(0, len(texts), bs):
+            out.extend(self._embed_batch(texts[i : i + bs]))
+        return out
