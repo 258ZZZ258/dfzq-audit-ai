@@ -27,23 +27,41 @@ class _FakeResp:
         pass
 
 
-class _FakeMinio:
-    """内存版 minio client(仅实现被 MinioObjectStore 调用的 3 方法)。"""
+class _FakeS3Error(Exception):
+    """拟真 minio.error.S3Error:仅暴露 exists() 判别用的 .code(不真装 minio SDK)。
 
-    def __init__(self) -> None:
+    真 S3Error 里 stat_object(HEAD)命中 404 且有 object_name → code=="NoSuchKey";
+    桶不存在→"NoSuchBucket"、鉴权→"AccessDenied"。exists() 只对 NoSuchKey 返 False,余上抛。
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class _FakeMinio:
+    """内存版 minio client(仅实现被 MinioObjectStore 调用的 3 方法)。
+
+    stat_error 若设:stat_object 恒抛此错(模拟鉴权/桶/网络等非 404),用于验 write-once 不吞错。
+    """
+
+    def __init__(self, *, stat_error: Exception | None = None) -> None:
         self.objs: dict[tuple[str, str], bytes] = {}
+        self._stat_error = stat_error
 
     def put_object(self, bucket, key, data, length, **kw):
         self.objs[(bucket, key)] = data.read()
 
     def get_object(self, bucket, key):
         if (bucket, key) not in self.objs:
-            raise RuntimeError("NoSuchKey")
+            raise _FakeS3Error("NoSuchKey")
         return _FakeResp(self.objs[(bucket, key)])
 
     def stat_object(self, bucket, key):
+        if self._stat_error is not None:
+            raise self._stat_error
         if (bucket, key) not in self.objs:
-            raise RuntimeError("NoSuchKey")
+            raise _FakeS3Error("NoSuchKey")
         return object()
 
 
@@ -81,6 +99,23 @@ def test_write_once_no_overwrite():
     s.put_raw("P-INT", "b1", "dv1", "pdf", b"first")
     s.put_raw("P-INT", "b1", "dv1", "pdf", b"second")  # write_once → 不覆盖
     assert s.get(ObjectStore.raw_key("P-INT", "b1", "dv1", "pdf")) == b"first"
+
+
+def test_exists_reraises_non_notfound():
+    # 非 404(鉴权/桶/网络)不得吞成 False——否则 write_once 会误判"不存在"而重写(Codex F2)
+    err = _FakeS3Error("AccessDenied")
+    s = MinioObjectStore(_FakeMinio(stat_error=err), "bkt")
+    with pytest.raises(_FakeS3Error, match="AccessDenied"):
+        s.exists("artifact/u1.json")
+
+
+def test_write_once_does_not_swallow_stat_error():
+    # write_once 路径遇非 404 须上抛,且不得静默 put_object(保留写一次证据语义)
+    c = _FakeMinio(stat_error=_FakeS3Error("AccessDenied"))
+    s = MinioObjectStore(c, "bkt")
+    with pytest.raises(_FakeS3Error, match="AccessDenied"):
+        s.put_raw("P-INT", "b1", "dv1", "pdf", b"x")
+    assert ("bkt", ObjectStore.raw_key("P-INT", "b1", "dv1", "pdf")) not in c.objs
 
 
 def test_from_config_local_default():

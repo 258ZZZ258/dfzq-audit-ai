@@ -1,8 +1,9 @@
-"""最小 OpenAI 兼容 LLM client(httpx)。E2 打标 / L2 元数据 / 案例摘要等 LLM 辅助共用。
+"""最小 OpenAI 兼容 LLM client(httpx)。**查询智能体 gateway 后端**复用本模块(``query.llm``
+懒导入 ``make_llm_client``);管线侧自建 LLM 富集(E2/L2/case_l2)已整段移除,不再消费本模块。
 
 env(运行期、**绝不入库**):``OPENAI_API_KEY``(必填)/ ``OPENAI_BASE_URL``(默认
 ``https://api.openai.com/v1``)/ ``OPENAI_MODEL``(默认 ``gpt-5.4-nano``)。
-**默认零调用**——仅在 ``e2_enabled`` 等开关开启时被构造;关闭时管线路径不触达本模块。
+**默认零调用**——仅当查询侧 ``[query] llm_backend = gateway`` 时被构造;stub/关闭时不触达本模块。
 """
 
 from __future__ import annotations

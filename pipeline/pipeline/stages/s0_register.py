@@ -270,11 +270,25 @@ def register_preseg_batch(
     return report
 
 
+# 死态(隔离/失败/拒收):不参与源幂等去重——同 source_doc_id + content_hash 的**修正件重提**
+# (如补密级但内容不变)必须能进管线;否则首次隔离后修复永远被当 DUPLICATE 挡住(Codex F1)。
+# 版本链 _latest_by_source_id → REVISE_REPLACE 会把旧死态版替代掉,不留活重复。
+_DEDUP_DEAD_STATES = frozenset(
+    {
+        PipelineState.QUARANTINED.value,
+        PipelineState.PARSE_FAILED.value,
+        PipelineState.REJECTED.value,
+    }
+)
+
+
 def _find_by_source_key(ctx: StageContext, sid: str, chash: str) -> DocVersion | None:
     with ctx.db.session() as s:
         return s.scalars(
             select(DocVersion).where(
-                DocVersion.source_doc_id == sid, DocVersion.content_hash == chash
+                DocVersion.source_doc_id == sid,
+                DocVersion.content_hash == chash,
+                DocVersion.pipeline_status.not_in(_DEDUP_DEAD_STATES),  # 死态可重提修复
             )
         ).first()
 

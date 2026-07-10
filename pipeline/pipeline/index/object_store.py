@@ -138,12 +138,16 @@ class MinioObjectStore(ObjectStore):
         return cls(client, bucket)
 
     def exists(self, key: str) -> bool:
-        # stat 抛即视为不存在(写一次 dedup 尽力而为;误判 → 重写等价内容,幂等无害)
         try:
             self._client.stat_object(self._bucket, key)
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            # 仅"对象不存在"(S3 NoSuchKey)视为 False;鉴权/桶不存在/网络等错误**上抛**——
+            # 否则 write_once=True 会把这些错误误判成"不存在"并 put_object,
+            # 破坏写一次语义(Codex F2)。
+            if getattr(e, "code", None) == "NoSuchKey":
+                return False
+            raise
 
     def get(self, key: str) -> bytes:
         resp = self._client.get_object(self._bucket, key)

@@ -155,6 +155,45 @@ def test_content_hash_change_autochains(reg, tmp_path):
     assert _by_fn(r2, "int-001").status == "DUPLICATE"  # 未变件照常幂等
 
 
+def test_quarantined_same_hash_repair_reingests(reg, tmp_path):
+    # F1:首入因密级缺失 QUARANTINED 后,补密级(同 source_doc_id+content_hash)重提须能进管线,
+    # 不得被源幂等当 DUPLICATE 永久挡住;死态旧版被 revise_replace 替代,继承 logical。
+    ctx, _, batches = reg
+    bid1, bid2 = "preseg-t5-repair-a", "preseg-t5-repair-b"
+    batches.extend([bid1, bid2])
+
+    # 批次 A:抹掉 ext-001 密级 → 隔离(去 cases 干扰)
+    batch_a = tmp_path / "repair_a"
+    shutil.copytree(FIXTURES, batch_a)
+    (batch_a / "cases.jsonl").unlink()
+    wb = load_workbook(batch_a / "manifest.xlsx")
+    ws = wb.active
+    header = [c.value for c in ws[1]]
+    pcol, fcol = header.index("perm_tag"), header.index("filename")
+    for row in ws.iter_rows(min_row=2):
+        if row[fcol].value == "ext-001":
+            row[pcol].value = None
+    wb.save(batch_a / "manifest.xlsx")
+
+    r1 = register_preseg_batch(ctx, bid1, batch_a, batch_a / "manifest.xlsx")
+    q = _by_fn(r1, "ext-001")
+    assert q.status == "QUARANTINED" and "密级" in q.reason
+
+    # 批次 B:同源同 hash,密级已补(默认 fixture perm=public)→ 不得判 DUPLICATE
+    batch_b = tmp_path / "repair_b"
+    shutil.copytree(FIXTURES, batch_b)
+    (batch_b / "cases.jsonl").unlink()
+    r2 = register_preseg_batch(ctx, bid2, batch_b, batch_b / "manifest.xlsx")
+    fixed = _by_fn(r2, "ext-001")
+    assert fixed.status == "REGISTERED" and fixed.doc_version_id != q.doc_version_id
+    with ctx.db.session() as s:
+        dv = s.get(DocVersion, fixed.doc_version_id)
+        assert dv.pipeline_status == "REGISTERED" and dv.perm_tag == "public"
+        assert dv.version_relation == "revise_replace"
+        assert dv.supersedes_version_id == q.doc_version_id  # 替代旧死态版
+        assert dv.logical_id == s.get(DocVersion, q.doc_version_id).logical_id  # 继承 logical
+
+
 def test_bad_blocks_quarantined(reg, tmp_path):
     ctx, _, batches = reg
     bid = "preseg-t5-badblocks"

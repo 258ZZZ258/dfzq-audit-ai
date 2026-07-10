@@ -134,3 +134,35 @@ dev/运维,仅**生产构建剔除入口**(减小人操作面/攻击面),不做�
   **教训:删模块前 grep 要带函数内懒导入(`grep 'import.*<mod>'` 全仓,非仅顶层)。**
 - **验证**:`--collect-only` 全仓 1006 tests / 0 收集错;真栈 150+ passed(config/s4_meta/preseg_e2e/
   orchestrator/e1/web/cases_ingest…);ruff 绿。全仓模型门留合并前。
+
+## 2026-07-10 Codex(PR47 全量差异)review 修复 + 预切块生产摄取入口
+
+Codex 按 `origin/main...HEAD` 全量审计出 2 Required(F1/F2)+ 1「需确认验收合同」(F3)+ 文档漂移。逐项处置:
+
+- **F1 隔离件被永久判重**(`s0_register._find_by_source_key`):源幂等查重原不排除死态,首次因密级缺失/
+  blocks 违约进 `QUARANTINED` 后,补密级(同 `source_doc_id+content_hash`,内容不变)重提在校验前就返
+  `DUPLICATE`,修正永进不了管线。→ 加 `_DEDUP_DEAD_STATES`(QUARANTINED/PARSE_FAILED/REJECTED)排除;
+  死态重提走 `_latest_by_source_id`→`REVISE_REPLACE` 替代旧死版、继承 logical。回归测
+  `test_quarantined_same_hash_repair_reingests`(连真 PG)。
+- **F2 MinIO `exists()` 吞非 404**(`object_store.py`):`except Exception: return False` 把鉴权/桶不存在/
+  网络错都当"对象不存在",`write_once` 随后 `put_object` 破坏写一次证据语义。→ 仅 `code=="NoSuchKey"` 返
+  False,余上抛。**实证核对 minio-py**:`stat_object`(HEAD)404+object_name→`NoSuchKey`、桶不存在→
+  `NoSuchBucket`、403→`AccessDenied`、网络异常无 `.code`,故区分正确。
+  **踩坑钉子**:F2 代码改动**破坏了既有 2 测试**——旧 `_FakeMinio.stat_object` 抛 `RuntimeError("NoSuchKey")`
+  没 `.code` 属性 → 新逻辑当非 404 上抛。改 fake 为拟真 `_FakeS3Error`(带 `.code`)+ 补 2 条非 404 上抛回归测。
+  **教训:改异常判别逻辑后必跑用 fake 的既有单测,fake 也得跟真 SDK 的错误形态。**
+- **F3 preseg 生产摄取无入口**(决策=**加薄 `python -m` 驱动 + 写合同**):`register_preseg_batch`+`_drive_batch`
+  原只在 `test_preseg_e2e` 手接,生产/运维无入口、且 `_drive_batch` 是 cli 私有函数。→ 新
+  `pipeline/preseg_ingest.py`(`python -m pipeline.preseg_ingest <batch_dir>`),照 E2E 两步登记+驱动。
+  **为何 `python -m` 而非 demo 子命令**:方案 A 生产构建剔除 demo/demo-web console_scripts,但 `python -m`
+  模块执行不受影响 → 给仓外转换脚本/运维稳定入口,不冲突。**合同**:甲方预切块语料批量灌库=转换脚本产出
+  批次目录(SPEC-PRESEG §3 接收契约)后调本入口;**B 模式**(`auto_confirm_meta_no_conflict` 开,默认)当场
+  过 s5 直达 INDEXED——**需嵌入模型 + Milvus**;**A 模式**至多到 `META_REVIEW`,到终态需 worker 上下文再驱动。
+- **文档漂移清理**(Optional):`PROMPTS.md` 删已删模块的死提示词(L2 业务域/案例 L2 T2.1·T2.2/E2 条款),
+  留查询侧 R5/N0/N1/N3(仍在用);文件头改为"查询智能体提示词"。`README.md` 富集层描述去 E2、`[toggles]`
+  只留 `e1_enabled`、env 去已弃用 `OPENAI_MODEL` 补 `PIPELINE_EMBEDDING_*`。`llm_client.py` 顶注改为"查询
+  gateway 复用、管线富集已移除"(该模块现**仅** query gateway 懒导入消费)。**未动**历史 devlog / SDD 文档
+  (SPEC/PLAN/TASKS/RTM/調研報告)——是时间点记录,重写=篡改历史,「全拆」最新条已记。
+- **验证**:`test_minio_object_store`(9)/`test_preseg_s0`(6,连真 PG)/`test_preseg_ingest_entry`(5,零栈
+  monkeypatch)+ 相邻 object_store/ondemand/s0 共 47 passed;`python -m pipeline.preseg_ingest --help` 正常;
+  ruff 绿。端到端 REGISTERED→INDEXED 仍由模型门 `test_preseg_e2e` 覆盖。

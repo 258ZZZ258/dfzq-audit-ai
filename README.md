@@ -4,7 +4,7 @@
 原地升格而来——见 `docs/CP-009-仓库与升格规范.md` / `docs/migration_devlog.md`)。
 
 当前已落地 **文档处理与语料库构建** 子系统:S0–S5 管线(**内规 / 外规 / 监管问答 / 案例** 四类语料档案,
-按 `corpus_type` 路由不同切块策略)+ 富集层(E1 义务预打标 · E2 实体/部门/事项 LLM 打标,默认关)+ 验证套件 +
+按 `corpus_type` 路由不同切块策略)+ 富集层(E1 义务预打标,零 LLM 正则,默认开)+ 验证套件 +
 Web 工作台,**契约对齐生产设计 v1.6**(CP-007 实体类型/期限归一、版本生命周期四态、案例要素抽取 `cases` 表);
 **制度查询 / 制度比对等智能体代码后续加入本仓**(布局约定与抽包触发见 CP-009)。
 
@@ -77,12 +77,12 @@ python3.11 -m venv .venv
 
 所有 ⚠ 可调值在 `config/`(`settings.toml` / `qc_thresholds.yaml` / `profiles.yaml`)。
 连接串与密钥可用环境变量覆盖:`PIPELINE_DB_DSN`、`PIPELINE_MILVUS_HOST`、`PIPELINE_EMBEDDING_MODE`、
-`PIPELINE_EMBEDDING_MODEL`、`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`、`HF_HOME`。
+`PIPELINE_EMBEDDING_MODEL`、`PIPELINE_EMBEDDING_BASE_URL`、`PIPELINE_EMBEDDING_API_KEY`、
+`OPENAI_BASE_URL`、`OPENAI_API_KEY`(endpoint 模式嵌入端点回落,`PIPELINE_EMBEDDING_*` 优先)、`HF_HOME`。
 
-**富集开关**(`[toggles]`):`e1_enabled` 义务预打标(零 LLM 正则,默认开)/ `e2_enabled` 实体·部门·事项 LLM
-打标(**默认关**,保零 LLM 默认路径)。开 E2:设 `e2_enabled=true` + 运行前 `export OPENAI_API_KEY=...`
-(`[llm] model` 默认 `gpt-5.4-nano`,可 env `OPENAI_MODEL` 覆盖;**密钥只走 env、绝不入库**)。字典约束来自
-`seeds/dict_entity_types.csv` / `dict_departments.csv`(初版占位,带 `dict_version`,评审后增量重打)。
+**富集开关**(`[toggles]`):`e1_enabled` 义务预打标(零 LLM 正则,**默认开**)。自建 LLM 富集(E2 实体/
+部门/事项 · L2 业务域/摘要 · case_l2 案例引用抽取)已整段移除——生产走**甲方预切块源结构化元数据**
+(preseg-only),不再有 pipeline 侧 LLM 打标通道及 `[llm]` 配置(查询侧 LLM 节点见 `PROMPTS.md`)。
 
 ## 离线嵌入缓存(驻场无外网)
 
