@@ -188,3 +188,26 @@ Codex 按 `origin/main...HEAD` 全量审计出 2 Required(F1/F2)+ 1「需确认�
   拒收**(行级汇总)。附带修 `block_seq=true`(bool 是 int 子类)被当 1 混入。回归测 7 例(blocks 3 + cases 4)。
 - **验证**:三处测试 42 passed;相邻 preseg 链 + embedding 81 passed / 7 skipped(模型门);ruff 绿;
   全仓 599 tests 收集 0 error。属 PR#47 上 Codex 第二轮 review。
+
+## 2026-07-10(三)Codex 三轮 review:两条修复补强 + 两处路径穿越
+
+前一轮 A/B 修得不彻底,加两处安全穿越。四条:
+
+- **content_hash 用字节哈希破坏语义幂等**(修正上轮 #1):上轮拿**原始 JSONL 字节 sha** 与旧版 `source_hash`
+  比,但 SPEC 幂等键是**源 content_hash 且明确替代文件 SHA 语义**——相同块内容仅调空格/JSON 键序/换行,字节
+  哈希就变 → 被误隔离 + 建新版本。→ 新增 `reader.blocks_content_hash`:对**解析后块记录**(按 block_seq 排序 +
+  稳定字段序)算 sha,纯重格式化不改哈希(**镜像案例 `record_hash` 先例**)。s0 dedup 交叉核验改用此指纹,
+  `source_hash` 存它。回归测 `test_reformat_only_still_duplicate`(键序重排+空格→仍 DUPLICATE)。
+- **案例 reader 类型校验仍不完整**(补强上轮 #3):Codex 实测仍接受 `persons:["not-an-object"]`(下游
+  `first.get()` 崩)、`issue_date:20260710`(下游 `date.fromisoformat` 抛 TypeError)、vreg `clause_label:21`
+  (条号归一化崩)、`content:123`(违字符串契约)。→ `read_cases` 补:persons 每项须 object、9 个字符串字段
+  (含日期串)出现即须 str、vreg.clause_label/content 须 str;`_iso_date` 加 `isinstance(str)` 纵深(防非 str 抛
+  TypeError)。**关键**:案例元数据 `case_enrich` 回读 raw 存储的原始 JSON,故必须在 reader 边界拦(整文件拒收)。
+- **ObjectStore 本地后端路径穿越**(上轮遗留未处理):`_path` 直接 `root / key`。`process_upload` 的 object_key
+  可用**绝对路径**读 root 外文件;含 `..` 的 upload_id 可把 artifact 写出 root。→ `_path` 统一
+  `(root/key).resolve()` + `is_relative_to(root)` 校验,拒绝绝对/`..` 逃逸。**MinIO 后端不走 `_path`**(直接
+  client+key),仅约束本地 FS。回归测:绝对 key / `..` 逃逸 / 正常 key 三例。
+- **preseg manifest filename 越过 blocks/**:`filename="../outside"` 会读批次目录他处 JSONL。→
+  `_register_one_preseg` 加 `fn != Path(fn).name` 单一文件名校验,非法 → `REJECTED`(新增 FileOutcome 状态)不建库。
+- **验证**:四条测试相关 78 passed;全仓 608 tests 收集 0 error;ruff 绿。端到端仍由模型门 `test_preseg_e2e` 覆盖。
+  属 PR#47 Codex 第三轮 review。

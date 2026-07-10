@@ -42,7 +42,7 @@ WHITELIST_FORMATS = {"docx", "pdf", "jpg", "png"}
 @dataclass
 class FileOutcome:
     filename: str
-    status: str  # REGISTERED | QUARANTINED | DUPLICATE | MISSING
+    status: str  # REGISTERED | QUARANTINED | DUPLICATE | MISSING | REJECTED
     doc_version_id: str | None = None
     logical_id: str | None = None
     reason: str = ""
@@ -305,10 +305,15 @@ def _latest_by_source_id(ctx: StageContext, sid: str) -> DocVersion | None:
 def _register_one_preseg(
     ctx: StageContext, batch_id: str, batch_dir: Path, row: dict, report: RegisterReport
 ) -> FileOutcome:
-    from pipeline.preseg.reader import PresegFormatError, read_blocks
+    from pipeline.preseg.reader import PresegFormatError, blocks_content_hash, read_blocks
     from pipeline.preseg.status_map import map_effective_status
 
     fn = str(row["filename"])
+    # 防路径穿越(Codex):filename 须为单一文件名,不得含 / \ .. 或绝对路径——
+    # 否则可越出 blocks/ 读任意文件。
+    if fn != Path(fn).name or fn in ("", ".", ".."):
+        reason = f"filename 非法(疑路径穿越,须为单一文件名):{fn!r}"
+        return FileOutcome(fn, "REJECTED", reason=reason)
     blocks_path = batch_dir / "blocks" / f"{fn}.jsonl"
     if not blocks_path.exists():
         return FileOutcome(fn, "MISSING", reason=f"blocks/{fn}.jsonl 不存在")
@@ -316,28 +321,35 @@ def _register_one_preseg(
     sid = str(row["source_doc_id"]).strip()
     chash = str(row["content_hash"]).strip()
     data = blocks_path.read_bytes()
-    actual_hash = hashlib.sha256(data).hexdigest()
     reason, ecode = None, None
 
+    # 契约校验 + 拿解析块算**语义规范化哈希**(非字节 sha):仅重格式化(空格/键序/换行)不改哈希,
+    # 真实内容变化才改——对齐 SPEC content_hash 语义(字节 sha 会把纯重排误判为内容变而误隔离,Codex)。
+    try:
+        blocks = read_blocks(blocks_path)
+    except PresegFormatError as e:
+        blocks = None
+        reason = f"preseg blocks 契约违约:{e}"
+    content_fingerprint = (
+        blocks_content_hash(blocks) if blocks is not None
+        else hashlib.sha256(data).hexdigest()  # 解析失败:兜底字节 sha(该件本就隔离,指纹不参与去重)
+    )
+
     dup = _find_by_source_key(ctx, sid, chash)
-    if dup is not None:
-        if dup.source_hash == actual_hash:  # 真幂等:声明 hash + 实际块内容都一致 → 不重登
+    if dup is not None and blocks is not None:
+        if dup.source_hash == content_fingerprint:  # 声明 hash + 块语义内容都一致 → 真幂等,不重登
             _record_duplicate(ctx, dup, batch_id, fn)
             report.warnings.append(f"{fn}: 源幂等键重复,关联 {dup.doc_version_id}")
             return FileOutcome(
                 fn, "DUPLICATE", doc_version_id=dup.doc_version_id, reason="源幂等键重复"
             )
-        # content_hash 声称相同但实际块字节已变 → 源幂等键失真(源改内容未更新哈希)。绝不静默
-        # 丢弃变化件(Codex):置 reason → 走隔离供人工核实,并经 _latest_by_source_id 版本链替代旧版。
+        # content_hash 声称相同但块语义内容已变 → 源幂等键失真(源改内容未更新哈希)。绝不静默丢弃
+        # 变化件(Codex):置 reason → 走隔离供人工,并经 _latest_by_source_id 版本链替代旧版。
         reason = (
             f"content_hash={chash} 与实际块内容不一致(源未随内容更新哈希);"
             f"关联现存版本 {dup.doc_version_id},隔离待人工核实"
         )
 
-    try:
-        read_blocks(blocks_path)  # 契约校验(违约 → 隔离供人工,不带病进管线)
-    except PresegFormatError as e:
-        reason = reason or f"preseg blocks 契约违约:{e}"  # 已置(hash 失真)则不覆盖
     perm = str(row.get("perm_tag") or "")
     if reason is None and not perm:
         reason = "密级缺失"
@@ -387,7 +399,7 @@ def _register_one_preseg(
                 logical_id=logical_id,
                 batch_id=batch_id,
                 source_format="preseg",  # 通道标识(非文件格式;reader 口径钉子)
-                source_hash=actual_hash,  # 实际块字节 sha256(dedup 交叉核验用同一值)
+                source_hash=content_fingerprint,  # 块语义规范化哈希(dedup 交叉核验用同一值)
                 raw_object_key=raw_key,
                 source_filename=fn,
                 pipeline_status=status.value,

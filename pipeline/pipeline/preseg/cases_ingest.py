@@ -101,7 +101,8 @@ def synthesize_case_doc(
 def _iso_date(value: str | None):
     from datetime import date
 
-    if not value:
+    # 非 str(reader 已拦;此为纵深:防 date.fromisoformat 收到非 str 抛未捕获 TypeError)
+    if not isinstance(value, str) or not value:
         return None
     try:
         return date.fromisoformat(value)

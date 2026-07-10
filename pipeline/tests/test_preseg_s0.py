@@ -156,6 +156,57 @@ def test_content_hash_change_autochains(reg, tmp_path):
     assert _by_fn(r2, "int-001").status == "DUPLICATE"  # 未变件照常幂等
 
 
+def test_reformat_only_still_duplicate(reg, tmp_path):
+    # content_hash 不变、块语义内容不变、仅 JSONL 重格式化(键序/空格/换行)→ 仍判 DUPLICATE
+    # (语义规范化哈希,非字节 sha;字节 sha 会把纯重排误判为内容变而误隔离——Codex)。
+    ctx, _, batches = reg
+    bid1, bid2 = "preseg-t5-reformat-a", "preseg-t5-reformat-b"
+    batches.extend([bid1, bid2])
+    r1 = register_preseg_batch(ctx, bid1, FIXTURES, FIXTURES / "manifest.xlsx")
+    assert _by_fn(r1, "ext-001").status == "REGISTERED"
+
+    batch2 = tmp_path / "reformat"
+    shutil.copytree(FIXTURES, batch2)
+    (batch2 / "cases.jsonl").unlink()
+    blk = batch2 / "blocks" / "ext-001.jsonl"
+    out_lines = []
+    for line in blk.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        # 键序重排 + indent 空格 → 压回单行:字节全变、解析后块记录不变
+        reserialized = json.dumps(rec, ensure_ascii=False, sort_keys=True, indent=2)
+        out_lines.append(" ".join(reserialized.split()))
+    blk.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    assert blk.read_bytes() != (FIXTURES / "blocks" / "ext-001.jsonl").read_bytes()  # 字节确已变
+
+    r2 = register_preseg_batch(ctx, bid2, batch2, batch2 / "manifest.xlsx")
+    assert _by_fn(r2, "ext-001").status == "DUPLICATE"  # 纯重格式化 → 幂等,不隔离/不新建
+
+
+def test_filename_path_traversal_rejected(reg, tmp_path):
+    # filename="../ext-001" 会越出 blocks/ 读批次目录他处 JSONL → 拒绝(Codex),不建库
+    ctx, _, batches = reg
+    bid = "preseg-t5-traversal"
+    batches.append(bid)
+    batch = tmp_path / "trav"
+    shutil.copytree(FIXTURES, batch)
+    (batch / "cases.jsonl").unlink()
+    wb = load_workbook(batch / "manifest.xlsx")
+    ws = wb.active
+    header = [c.value for c in ws[1]]
+    fcol = header.index("filename")
+    for row in ws.iter_rows(min_row=2):
+        if row[fcol].value == "ext-001":
+            row[fcol].value = "../ext-001"
+    wb.save(batch / "manifest.xlsx")
+
+    report = register_preseg_batch(ctx, bid, batch, batch / "manifest.xlsx")
+    out = _by_fn(report, "../ext-001")
+    assert out.status == "REJECTED" and "路径穿越" in out.reason
+    assert out.doc_version_id is None  # 拒绝在建库前,未落任何版本
+
+
 def test_content_hash_stale_content_changed_quarantines(reg, tmp_path):
     # content_hash 声称不变、但实际块字节已变(源改内容未更新哈希)→ 绝不静默判 DUPLICATE 丢弃;
     # 交叉核验 source_hash 不符 → 隔离供人工,并版本链替代旧版(Codex)。

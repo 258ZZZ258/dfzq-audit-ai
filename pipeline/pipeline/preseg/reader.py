@@ -147,6 +147,22 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
     return sorted(blocks, key=lambda b: b.block_seq)
 
 
+def blocks_content_hash(blocks: list[PresegBlock]) -> str:
+    """块内容**语义规范化哈希**:对解析后的块记录(按 block_seq 排序 + 稳定字段序)→ sha256。
+
+    仅重格式化(空格 / JSON 键序 / 换行)不改哈希,真实内容变化才改——对齐 SPEC 的 content_hash 语义
+    (**明确替代文件字节 sha**;字节 sha 会把纯重排误判为内容变而错误隔离)。作 s0 源幂等去重的内容
+    指纹:声明 content_hash 命中时再交叉核验此指纹,失真才隔离(非静默丢弃变化件)。
+    """
+    canon = [
+        {"block_seq": b.block_seq, "text": b.text,
+         "clause_label": b.clause_label, "is_table": b.is_table}
+        for b in sorted(blocks, key=lambda b: b.block_seq)
+    ]
+    payload = json.dumps(canon, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def read_cases(path: Path) -> list[PresegCase]:
     """cases JSONL → PresegCase 列表;case_name 必填、violated_regulations[].title 必填、
     persons 须为 list(内容原样照存,D6 不做字段级裁剪)。"""
@@ -164,9 +180,18 @@ def read_cases(path: Path) -> list[PresegCase]:
         if not isinstance(persons, list):
             errors.append(f"line {lineno}: persons 必须是 list")
             continue
+        if not all(isinstance(p, dict) for p in persons):  # 每项须 object → 下游 first.get() 才不崩
+            errors.append(f"line {lineno}: persons 每项须为 object")
+            continue
         tags = rec.get("tags", [])
         if not isinstance(tags, list):  # 非 list(如 "a;b" 串)→ 后续检索/展示错解
             errors.append(f"line {lineno}: tags 必须是 list")
+            continue
+        # 各字符串字段类型校验:日期串(issue_date/occurred_at)非 str → 下游 date.fromisoformat 抛
+        # TypeError;其余串字段非 str 违约。缺(None)允许。
+        str_err = _bad_str_field(rec, lineno)
+        if str_err:
+            errors.append(str_err)
             continue
         vregs_raw = rec.get("violated_regulations", [])
         if not isinstance(vregs_raw, list):  # 非 list → enumerate 会遍历键/字符,静默生成垃圾
@@ -175,9 +200,24 @@ def read_cases(path: Path) -> list[PresegCase]:
         vregs: list[ViolatedReg] = []
         bad = False
         for j, v in enumerate(vregs_raw):
-            title = (v or {}).get("title") if isinstance(v, dict) else None
+            if not isinstance(v, dict):
+                errors.append(f"line {lineno}: violated_regulations[{j}] 须为 object")
+                bad = True
+                break
+            title = v.get("title")
             if not isinstance(title, str) or not title.strip():
                 errors.append(f"line {lineno}: violated_regulations[{j}].title 必填且须为字符串")
+                bad = True
+                break
+            # clause_label 非 str → 下游条号归一化崩;content 非 str 违约声明契约。缺(None)允许。
+            sub_err = next(
+                (f"line {lineno}: violated_regulations[{j}].{k} 须为字符串"
+                 for k in ("clause_label", "content")
+                 if v.get(k) is not None and not isinstance(v.get(k), str)),
+                None,
+            )
+            if sub_err:
+                errors.append(sub_err)
                 bad = True
                 break
             vregs.append(
@@ -210,6 +250,22 @@ def read_cases(path: Path) -> list[PresegCase]:
     if errors:
         raise PresegFormatError(f"{path.name} 行级校验失败:\n" + "\n".join(errors))
     return cases
+
+
+#: 案例可空字符串字段:出现即须为 str(日期串下游进 date.fromisoformat,类型错会抛未捕获 TypeError)
+_CASE_STR_FIELDS = (
+    "source_case_id", "doc_number", "issuing_org", "issue_date", "occurred_at",
+    "case_type", "problem_summary", "description", "source_url",
+)
+
+
+def _bad_str_field(rec: dict, lineno: int) -> str | None:
+    """首个类型不符的字符串字段错误消息(None=全部合法)。"""
+    for f in _CASE_STR_FIELDS:
+        val = rec.get(f)
+        if val is not None and not isinstance(val, str):
+            return f"line {lineno}: {f} 须为字符串(得 {type(val).__name__})"
+    return None
 
 
 def _record_hash(rec: dict) -> str:

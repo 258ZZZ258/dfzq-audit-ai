@@ -1,6 +1,30 @@
+import pytest
+
 from common.ir import Block, BlockType, IRDocument, SourceFormat
 from pipeline.config import load_config
 from pipeline.index.object_store import ObjectStore
+
+
+def test_path_rejects_absolute_key(tmp_path):
+    # 绝对 key(root / 绝对 → 丢弃 root)→ 越界拒绝,防读 root 外(Codex 路径穿越)
+    store = ObjectStore(tmp_path)
+    with pytest.raises(ValueError, match="越界"):
+        store.exists("/etc/passwd")
+
+
+def test_path_rejects_dotdot_escape(tmp_path):
+    # .. 逃逸 root → 拒绝(process_upload 的 upload_id 含 .. 不得写出 root)
+    store = ObjectStore(tmp_path)
+    with pytest.raises(ValueError, match="越界"):
+        store.get("../outside.json")
+    with pytest.raises(ValueError, match="越界"):
+        store._write("artifact/../../evil.json", b"x", write_once=False)
+
+
+def test_path_allows_normal_key(tmp_path):
+    store = ObjectStore(tmp_path)
+    store.put_raw("P-EXT", "b", "DV1", "pdf", b"x")  # 正常相对 key 不受影响
+    assert store.exists("raw/P-EXT/b/DV1.pdf")
 
 
 def test_key_layout():

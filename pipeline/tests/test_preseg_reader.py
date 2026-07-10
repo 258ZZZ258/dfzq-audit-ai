@@ -185,3 +185,35 @@ class TestCases:
         p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
         with pytest.raises(PresegFormatError, match="title"):
             read_cases(p)
+
+    def test_persons_item_must_be_object(self, tmp_path):
+        # persons=["not-an-object"] → 下游 first.get() 崩 → 拒收(Codex 实测例)
+        rec = {"case_name": "A", "persons": ["not-an-object"]}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="persons"):
+            read_cases(p)
+
+    def test_non_str_issue_date_rejected(self, tmp_path):
+        # issue_date=20260710(int)→ 下游 date.fromisoformat 抛 TypeError → 拒收(Codex 实测例)
+        rec = {"case_name": "A", "issue_date": 20260710}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="issue_date"):
+            read_cases(p)
+
+    def test_non_str_violated_clause_label_rejected(self, tmp_path):
+        # clause_label=21(int)→ 下游条号归一化崩 → 拒收(Codex 实测例)
+        rec = {"case_name": "A", "violated_regulations": [{"title": "《X》", "clause_label": 21}]}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="clause_label"):
+            read_cases(p)
+
+    def test_non_str_violated_content_rejected(self, tmp_path):
+        # content=123(int)→ 违约声明的字符串契约 → 拒收(Codex 实测例)
+        rec = {"case_name": "A", "violated_regulations": [{"title": "《X》", "content": 123}]}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="content"):
+            read_cases(p)

@@ -53,7 +53,13 @@ class ObjectStore:
 
     # ── 通用 ──────────────────────────────────────────────────
     def _path(self, key: str) -> Path:
-        return self.root / key
+        # 防路径穿越(Codex):key 恒为 root 下相对路径。绝对 key(``root / 绝对`` 会丢弃 root)
+        # 或含 .. 逃逸 → 解析后不在 root 内 → 拒绝。外部可控入参(process_upload 的 object_key /
+        # upload_id)不得读写 root 外。MinIO 后端不走本方法(直接用 client + key),仅约束本地 FS 后端。
+        p = (self.root / key).resolve()
+        if not p.is_relative_to(self.root.resolve()):
+            raise ValueError(f"ObjectStore key 越界(拒绝绝对路径 / .. 逃逸 root):{key!r}")
+        return p
 
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
