@@ -52,6 +52,8 @@ class ChunkSpec:
     parent_chunk_id: str | None = None  # 子块指向其节级父块 chunk_id(无节则 None)
     internal_refs: list[dict] | None = None  # 正文条款引用(前置信号);父/表块为 None
     embed_status: str = "pending"  # pending | done | failed(建块即 pending)
+    # 适用实体类型(CP-010 D7:preseg 文档级"适用对象"继承;自建通道恒 None,E2 走 clause_tags)
+    entity_type: list | None = None
 
 
 def count_tokens(text: str) -> int:

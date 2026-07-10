@@ -13,7 +13,7 @@ from datetime import date
 from common.pg_models import DocVersion
 from pipeline.index.corpus_rows import build_rows, indexable_chunks, rows_from_cold_strict
 from pipeline.index.milvus_io import dense_to_bytes, sparse_to_bytes
-from pipeline.meta.version_chain import live_status
+from pipeline.meta.version_chain import resolve_live_status
 from pipeline.stage_base import StageContext, StageResult
 from pipeline.states import PipelineState
 
@@ -43,7 +43,7 @@ def index(ctx: StageContext, doc_version_id: str) -> StageResult:
     待 ``demo activate`` 翻 effective),否则 effective。version_status 同步翻同值。
     """
     dv = ctx.db.get(DocVersion, doc_version_id)
-    live = live_status(dv.effective_date, date.today())
+    live = resolve_live_status(dv, date.today())  # D3 源权威件保源值(T8),余走推导
     chunks = indexable_chunks(ctx.db, doc_version_id)
     if chunks:  # 从 PG 冷备重建上线行 upsert(零重编码),按 chunk_id 覆盖 embed 的 staging upsert
         # 严格:任一块缺冷备即抛 → 文档不进 INDEXED(不可在缺投影下翻状态)。维护命令才用跳过式。

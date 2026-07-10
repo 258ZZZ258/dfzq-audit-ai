@@ -34,8 +34,16 @@ class QueryConfig(BaseModel):
     judge_constituent_llm: bool = False   # ⚠ R5 构成要件框定用 LLM 抽取(§6.5②);默认关=clause直呈
     judge_multimodel_review: bool = False  # ⚠ R5 §9.2 多模型复核;默认关=代码后检+形态保障
     llm_backend: Literal["stub", "gateway"] = "stub"   # QUERY_LLM_BACKEND 覆盖
-    rerank_backend: Literal["none", "bge"] = "none"    # QUERY_RERANK_BACKEND 覆盖
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # ⚠ §5.5 bge 模型名/路径;QUERY_RERANK_MODEL 覆盖
+    # none(RRF 序)| bge(本地 cross-encoder)| api(Jina/Cohere 风远程 /rerank);env 覆盖
+    rerank_backend: Literal["none", "bge", "api"] = "none"
+    # ⚠ §5.5 bge 本地模型名/路径 或 api 网关注册名;QUERY_RERANK_MODEL 覆盖
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # ── rerank_backend=api(远程重排端点;base_url/api_key 走 env,绝不入库)──
+    rerank_endpoint_base_url: str | None = None  # QUERY_RERANK_BASE_URL(env)
+    rerank_endpoint_api_key: str | None = None  # QUERY_RERANK_API_KEY(env,绝不入库)
+    rerank_endpoint_path: str = "/rerank"  # ⚠ base_url 后拼接路径
+    # ⚠ 请求 top_n(None=不限,返回全部重排;缺项候选补回原序不丢)
+    rerank_endpoint_top_n: int | None = None
     llm_model: str = "gpt-5.4-nano"  # ⚠ gateway 时主答模型名;env OPENAI_MODEL 可覆盖
     # ⚠ §9.2 忠实性复核模型(Kimi),与主答 llm_model 分离(§9.1);默认 kimi-2.5 为意图占位,
     # 真名待甲方网关注册表;env QUERY_REVIEW_MODEL(query 专属)/ OPENAI_REVIEW_MODEL 覆盖。
@@ -87,6 +95,12 @@ def _apply_env(raw: dict) -> None:
         raw["rerank_backend"] = env["QUERY_RERANK_BACKEND"]
     if "QUERY_RERANK_MODEL" in env:
         raw["rerank_model"] = env["QUERY_RERANK_MODEL"]
+    if "QUERY_RERANK_BASE_URL" in env:  # api 后端远程端点(env,不入库)
+        raw["rerank_endpoint_base_url"] = env["QUERY_RERANK_BASE_URL"]
+    if "QUERY_RERANK_API_KEY" in env:
+        raw["rerank_endpoint_api_key"] = env["QUERY_RERANK_API_KEY"]
+    if "QUERY_RERANK_PATH" in env:
+        raw["rerank_endpoint_path"] = env["QUERY_RERANK_PATH"]
     if "OPENAI_MODEL" in env:
         raw["llm_model"] = env["OPENAI_MODEL"]
     # 复核模型:OPENAI_REVIEW_MODEL(通用)先,QUERY_REVIEW_MODEL(query 专属)后 → 后者优先。

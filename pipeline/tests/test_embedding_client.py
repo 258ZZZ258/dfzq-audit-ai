@@ -26,18 +26,18 @@ def test_empty_returns_empty():
     assert LocalBGEM3Client(load_config().embedding).embed([]) == []
 
 
-def test_endpoint_stub_fails_fast_at_construction():
-    # M1 未实现 endpoint:**构造即抛**(fail-fast),不留到 S5 嵌入才崩
-    cfg = load_config().embedding
-    with pytest.raises(NotImplementedError):
+def test_endpoint_fails_fast_without_base_url():
+    # endpoint 已实现,但缺 endpoint_base_url:**构造即抛**(fail-fast),不留到 S5 嵌入才崩
+    cfg = load_config().embedding  # 默认 settings.toml 未配 endpoint_base_url
+    with pytest.raises(ValueError, match="base_url"):
         EndpointClient(cfg)
 
 
-def test_from_config_endpoint_fails_fast():
-    # 部署切到 mode=endpoint:from_config 选到 EndpointClient 即清晰失败,而非埋到下游
+def test_from_config_endpoint_fails_fast_without_base_url():
+    # 部署切到 mode=endpoint 却未配 base_url:from_config 选到 EndpointClient 即清晰失败,而非埋到下游
     settings = load_config().model_copy(deep=True)
     settings.embedding.mode = "endpoint"
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="base_url"):
         EmbeddingClient.from_config(settings)
 
 

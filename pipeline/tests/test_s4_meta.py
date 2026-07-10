@@ -96,28 +96,6 @@ def _ctx_with_toggle(ctx, *, auto_confirm: bool) -> StageContext:
     )
 
 
-def _ctx_l2(ctx, *, auto_confirm: bool = True) -> StageContext:
-    """开 l2_enabled(+ auto_confirm):验业务域 L2 待确认能否阻自动放行。"""
-    toggles = ctx.config.toggles.model_copy(
-        update={"l2_enabled": True, "auto_confirm_meta_no_conflict": auto_confirm}
-    )
-    return StageContext(
-        config=ctx.config.model_copy(update={"toggles": toggles}),
-        object_store=ctx.object_store,
-        db=ctx.db,
-    )
-
-
-class _FakeBizClient:
-    """注入式假 LLM:chat_json 恒返回预置 biz_domains(零网络、无 key)。"""
-
-    def __init__(self, biz_names):
-        self._biz = biz_names
-
-    def chat_json(self, system, user):
-        return {"biz_domains": self._biz}
-
-
 def test_consistent_meta_enqueues_routine_confirm(env):
     # A 模式(关自动放行):无冲突件也入 meta_confirm 队列(META_REVIEW 全件强制人工闸)。
     ctx, bids = env
@@ -243,55 +221,3 @@ def test_upsert_case_get_case_round_trip(env):
     ctx.db.upsert_case(dvid, {"penalty_org": "乙局", "amount_wan": 20.0})
     row2 = ctx.db.get_case(dvid)
     assert row2.penalty_org == "乙局" and row2.amount_wan == 20.0
-
-
-# ── T2.3b 业务域 L2 profile 分档(连真 PG + 真 dict_biz_domains + fake LLM)──────────
-def test_biz_l2_pint_candidate_gates_to_review(env, monkeypatch):
-    # 内规 P-INT:LLM 业务域候选恒入 META_REVIEW —— 即便 auto_confirm 开也不放行(权威担责)。
-    ctx, bids = env
-    ctx = _ctx_l2(ctx, auto_confirm=True)
-    biz0 = ctx.db.get_biz_domains()[0].name
-    monkeypatch.setattr(s4, "make_llm_client", lambda *a, **k: _FakeBizClient([biz0]))
-    dvid = _seed(
-        ctx, bids, doc_number="京证监〔2024〕5号", issue_date=date(2024, 1, 1),
-        title="某办法", corpus="P-INT",
-    )
-    res = s4.run(ctx, dvid)
-    assert res.next_state is PS.META_REVIEW
-    assert "业务域" in res.queue.reason
-    assert res.evidence["biz_l2"] == {"needs_review": True, "biz_domains": [biz0], "source": "llm"}
-    dv = ctx.db.get(DocVersion, dvid)
-    assert dv.biz_domains == [biz0] and dv.biz_domain_source == "llm"
-
-
-def test_biz_l2_pext_direct_lands(env, monkeypatch):
-    # 外规 P-EXT:LLM 业务域直落 effective(sampling_rate=0)→ 仍自动放行 EMBEDDING,但已写权威字段。
-    ctx, bids = env
-    ctx = _ctx_l2(ctx, auto_confirm=True)
-    biz0 = ctx.db.get_biz_domains()[0].name
-    monkeypatch.setattr(s4, "make_llm_client", lambda *a, **k: _FakeBizClient([biz0]))
-    dvid = _seed(
-        ctx, bids, doc_number="京证监〔2024〕5号", issue_date=date(2024, 1, 1),
-        title="某办法", corpus="P-EXT",
-    )
-    res = s4.run(ctx, dvid)
-    assert res.next_state is PS.EMBEDDING  # 直落
-    dv = ctx.db.get(DocVersion, dvid)
-    assert dv.biz_domains == [biz0] and dv.biz_domain_source == "llm"
-
-
-def test_biz_l2_manifest_conflict_prefers_manifest_and_gates(env, monkeypatch):
-    # manifest 已给业务域 → 优先(source=manifest);与 LLM 不一致 → 冲突 → META_REVIEW(§7.1)。
-    ctx, bids = env
-    ctx = _ctx_l2(ctx, auto_confirm=True)
-    names = [d.name for d in ctx.db.get_biz_domains()]
-    manifest_biz, llm_biz = names[0], names[1]  # 两个不同字典值 → 冲突
-    monkeypatch.setattr(s4, "make_llm_client", lambda *a, **k: _FakeBizClient([llm_biz]))
-    dvid = _seed(
-        ctx, bids, doc_number="京证监〔2024〕5号", issue_date=date(2024, 1, 1),
-        title="某办法", corpus="P-EXT", biz_domain=manifest_biz,
-    )
-    res = s4.run(ctx, dvid)
-    assert res.next_state is PS.META_REVIEW
-    dv = ctx.db.get(DocVersion, dvid)
-    assert dv.biz_domains == [manifest_biz] and dv.biz_domain_source == "manifest"  # manifest 优先

@@ -32,21 +32,6 @@ def reloadable_chunks(db: PgIO, dvid: str) -> list[Chunk]:
     ]
 
 
-#: issuer_level 文本 → INT8 分层序(§8.2;序值越大权威越高)。⚠ 口径随生产标定。
-_ISSUER_LEVEL_RANK = {"内部": 1, "自律组织": 2, "部级": 3}
-
-
-def _issuer_level(db: PgIO, dv: DocVersion) -> int:
-    """dv.issuer(code 或 name)→ 字典 issuer_level 文本 → INT8 序(§8.2);解析不出为 0。"""
-    v = (dv.issuer or "").strip()
-    if not v:
-        return 0
-    for i in db.get_issuers():
-        if i.code == v or i.name == v:
-            return _ISSUER_LEVEL_RANK.get((i.issuer_level or "").strip(), 0)
-    return 0
-
-
 def _yyyymmdd(d) -> int:
     """date → INT64 yyyymmdd(Milvus 时间窗过滤);None → 0。"""
     return d.year * 10000 + d.month * 100 + d.day if d else 0
@@ -72,7 +57,9 @@ def build_rows(
     dv = db.get(DocVersion, dvid)
     doc = db.get(Document, dv.logical_id)
     corpus = (doc.corpus_type if doc else "") or ""  # corpus_type 在 Document(逻辑文档)
-    issuer_level = _issuer_level(db, dv)
+    # issuer_level 前瞻字段(分层过滤 §8.2 未实现):dict_issuers 已裁,恒 0;将来做分层检索时
+    # 取自甲方「法律位阶/效力层级」(issuer_level_src),见 preseg 遗留 issuer_level_src→INT8。
+    issuer_level = 0
     eff = _yyyymmdd(dv.effective_date)
     perm = [dv.perm_tag] if dv.perm_tag else []  # 单值 → ARRAY(§8.2)
     # 业务域 ARRAY:优先 L2 多值 biz_domains(§7.1);空则回落 manifest 原单值 biz_domain(向后兼容)。

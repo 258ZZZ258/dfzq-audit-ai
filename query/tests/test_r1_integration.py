@@ -5,6 +5,7 @@ gate 见 conftest.indexed_stack(PIPELINE_EMBEDDING_MODEL + PG + Milvus + soffice
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from common.pg_models import Chunk
@@ -13,6 +14,15 @@ from query.contract import RouteType
 from query.generate.r1_evidence import generate_evidence
 from query.llm.stub import StubLLMClient
 from query.retrieve.hybrid import Retriever
+
+
+@pytest.fixture(autouse=True)
+def _ensure_milvus_connected(indexed_stack):
+    """重连 Milvus(幂等):pymilvus 全局 "default" 连接会被字母序前序模块的模块级 teardown
+    ``mio.disconnect()`` 断开(房式惯例=各模块断连、后继自连,test_r3 同款补丁)。r1 此前靠
+    前序恰无人断连的运气通过;CP-010 的 test_preseg_bridge_integration 插到它前面后暴露。
+    """
+    indexed_stack[1].connect()  # (pg, mio, ctx, dvid, query) 之 mio
 
 
 def test_r1_end_to_end_faithful(indexed_stack):

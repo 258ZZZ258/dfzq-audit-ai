@@ -29,7 +29,7 @@ from common.pg_models import (
 )
 from pipeline.chunking import ref_resolver
 from pipeline.config import load_config
-from pipeline.enrich import e1_obligation, e2_tag
+from pipeline.enrich import e1_obligation
 from pipeline.index import corpus_rows
 from pipeline.index.corpus_rows import ColdBackupIncomplete
 from pipeline.index.embedding_client import EmbeddingClient
@@ -115,17 +115,6 @@ def _safe_e1(fn, ctx: StageContext, dvid: str) -> None:
         logger.warning("E1 义务打标 %s(%s)失败(不阻断):%s", fn.__name__, dvid, e)
 
 
-def _safe_e2(ctx: StageContext, dvid: str) -> None:
-    """跑 E2 LLM 打标,LLMError / 任何异常吞掉记日志。
-
-    同 E1:富集无终态阻断权,不阻断 _structuring。
-    """
-    try:
-        e2_tag.run_e2(ctx, dvid)
-    except Exception as e:  # noqa: BLE001 — E2(含 LLMError / 网络失败)不阻断管线
-        logger.warning("E2 条款级打标(%s)失败(不阻断):%s", dvid, e)
-
-
 def _safe_refs(fn, ctx: StageContext, dvid: str) -> None:
     """跑 ref_resolver 步(clear/run),异常吞掉——standoff 解析失败不阻断 _structuring(§6.7)。"""
     try:
@@ -137,26 +126,21 @@ def _safe_refs(fn, ctx: StageContext, dvid: str) -> None:
 def _structuring(ctx: StageContext, doc_version_id: str) -> StageResult:
     """STRUCTURING 复合(在装配层组合,守 CLAUDE.md「stage 之间不得互相 import」约束):
 
-    E1/E2 富集(可选)→ s3 切块 → E1/E2 打标 → s4 元数据。`e1_enabled`/`e2_enabled` 时:**先 `clear`
-    (在 s3 `replace_chunks` 删 chunk 之前,避 `clause_tags` 外键)→ s3 → `tag`/`run_e2`**;
-    E1/E2 异常不阻断(`_safe_e1`/`_safe_e2`)。E2 默认关 → 默认路径零 LLM(不构造 client)。
+    E1 富集(可选,零 LLM 正则)→ s3 切块 → E1 打标 → s4 元数据。`e1_enabled` 时:**先 `clear`
+    (在 s3 `replace_chunks` 删 chunk 之前,避 `clause_tags` 外键)→ s3 → `tag`**;
+    E1 异常不阻断(`_safe_e1`)。**LLM 富集(E2/L2/case_l2)已整段移除**——本管线零 LLM。
     s3 切块副作用写 chunks(StageResult 弃用)→ s4 交叉校验定 META_REVIEW(冲突时 meta_confirm 队列)。
-    s3/s4/e1/e2 互不依赖、各自可测;最终态由 s4 决定。
+    s3/s4/e1 互不依赖、各自可测;最终态由 s4 决定。
     """
     e1_on = ctx.config.toggles.e1_enabled
-    e2_on = ctx.config.toggles.e2_enabled
     if e1_on:
         _safe_e1(e1_obligation.clear, ctx, doc_version_id)  # 先于 s3 删 chunk,避 clause_tags FK
-    if e2_on:
-        _safe_e1(e2_tag.clear, ctx, doc_version_id)  # 同理:先清 E2 行再删 chunk(scope 限 E2)
     # ref_resolver:clear 先于 s3 删 chunk(避 clause_references FK);run 在 s3 后写 standoff(非阻断)
     _safe_refs(ref_resolver.clear_refs, ctx, doc_version_id)
     s3_structure.run(ctx, doc_version_id)
     _safe_refs(ref_resolver.run_resolver, ctx, doc_version_id)
     if e1_on:
         _safe_e1(e1_obligation.tag, ctx, doc_version_id)
-    if e2_on:
-        _safe_e2(ctx, doc_version_id)  # 默认关 → 零 LLM;开时 run_e2 内含 clear 再打,异常吞掉
     return s4_meta.run(ctx, doc_version_id)
 
 

@@ -253,23 +253,16 @@ class PgIO:
     def seed_dicts(self, seeds_dir: str | Path) -> dict[str, int]:
         """从 CSV 导入字典表(merge 即 upsert,可重复执行)。返回 {表名: 行数}。
 
-        含 dict_issuers / dict_biz_domains + V1.6 新增 dict_entity_types / dict_departments
-        (E2 打标约束字典,§19.2;带 dict_version)。
+        仅 seed **保留字典**:dict_biz_domains / dict_entity_types(查询侧 biz_domain/entity_type
+        词表)+ dict_aliases(口语简称→canonical)。**dict_issuers / dict_departments /
+        dict_violation_types 已裁**(甲方预结构化冗余;富集默认关;issuer_level 空转)——表 add-only
+        留存但不再 seed/派生;consumer(E2/case_l2 打标)默认关时无值即降级。
         """
         seeds_dir = Path(seeds_dir)
-        issuers = _read_csv(seeds_dir / "dict_issuers.csv")
         domains = _read_csv(seeds_dir / "dict_biz_domains.csv")
         entity_types = _read_csv(seeds_dir / "dict_entity_types.csv")
-        departments = _read_csv(seeds_dir / "dict_departments.csv")
-        violation_types = _read_csv(seeds_dir / "dict_violation_types.csv")
         aliases = _read_csv(seeds_dir / "dict_aliases.csv")
         with self.session() as s:
-            for r in issuers:
-                s.merge(
-                    DictIssuer(
-                        code=r["code"], name=r["name"], issuer_level=r.get("issuer_level") or None
-                    )
-                )
             for r in domains:
                 s.merge(
                     DictBizDomain(
@@ -279,18 +272,6 @@ class PgIO:
             for r in entity_types:
                 s.merge(
                     DictEntityType(
-                        code=r["code"], name=r["name"], dict_version=r.get("dict_version") or None
-                    )
-                )
-            for r in departments:
-                s.merge(
-                    DictDepartment(
-                        code=r["code"], name=r["name"], dict_version=r.get("dict_version") or None
-                    )
-                )
-            for r in violation_types:
-                s.merge(
-                    DictViolationType(
                         code=r["code"], name=r["name"], dict_version=r.get("dict_version") or None
                     )
                 )
@@ -304,11 +285,8 @@ class PgIO:
                     )
                 )
         return {
-            "issuers": len(issuers),
             "biz_domains": len(domains),
             "entity_types": len(entity_types),
-            "departments": len(departments),
-            "violation_types": len(violation_types),
             "aliases": len(aliases),
         }
 

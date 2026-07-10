@@ -102,6 +102,18 @@ class DocVersion(AuditMixin, Base):
     degraded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     last_error_code: Mapped[str | None] = mapped_column(String(16))
 
+    # ── P-PRESEG 预切块源通道(CP-010,迁移 0013,add-only;SPEC-PRESEG §5)──
+    source_doc_id: Mapped[str | None] = mapped_column(String(64), index=True)  # 源系统主键(幂等键)
+    content_hash: Mapped[str | None] = mapped_column(String(64))  # 源内容哈希(幂等键第二分量)
+    # 效力状态权威留痕(D3 按通道分权威):chain(版本链推导,现状默认)| source(源系统直给)
+    version_status_source: Mapped[str | None] = mapped_column(String(16))
+    issuer_level_src: Mapped[str | None] = mapped_column(String(64))  # 源法律位阶/效力层级原值
+    # 源"适用对象"(文档级,D7):S3 继承写每 chunk.entity_type → Milvus 投影;迁移 0014
+    entity_types: Mapped[list | None] = mapped_column(JSONB)
+    tags: Mapped[list | None] = mapped_column(JSONB)  # 源标签
+    file_no: Mapped[str | None] = mapped_column(String(128))  # 内规文件编号(与文号并存的双编号)
+    source_created_by: Mapped[str | None] = mapped_column(String(64))  # 源系统创建人(≠created_by)
+
 
 class Chunk(AuditMixin, Base):
     __tablename__ = "chunks"
@@ -335,6 +347,11 @@ class Case(AuditMixin, Base):
     amount_wan: Mapped[float | None] = mapped_column(Float)  # 金额(万元)
     # 引用对齐失败 → 低优先人工队列,不阻塞案例入库(§9)
     ref_unresolved: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+    # ── P-PRESEG 案例结构化直装(CP-010,迁移 0013,add-only;决策 D6)──
+    persons: Mapped[list | None] = mapped_column(JSONB)  # 涉案人员原样照存,不进检索/Milvus
+    occurred_at: Mapped[date | None] = mapped_column(Date)  # 发生时间(≠处罚/发文日期)
+    source_url: Mapped[str | None] = mapped_column(String(512))  # 源系统原文链接(内网可达性待核)
 
 
 # ── 制度查询智能体会话(功能1,SPEC-API §7;query 自有域)──────────────────────

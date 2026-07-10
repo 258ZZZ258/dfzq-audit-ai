@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, text
 from ulid import ULID
 
 from common.pg_models import (
-    DictIssuer,
+    DictBizDomain,
     Document,
     DocVersion,
     ImportBatch,
@@ -60,9 +60,17 @@ def doc_version(pg):
 
 def test_seed_dicts(pg):
     counts = pg.seed_dicts(REPO / "seeds")
-    assert counts["issuers"] >= 1 and counts["biz_domains"] >= 1
-    assert counts["entity_types"] >= 1 and counts["departments"] >= 1
-    assert pg.get(DictIssuer, "CSRC").name == "中国证券监督管理委员会"
+    # 仅保留字典 seed(issuers/departments/violation_types 已裁)
+    assert counts["biz_domains"] >= 1 and counts["entity_types"] >= 1
+    assert counts["aliases"] >= 1
+    assert "issuers" not in counts and "departments" not in counts
+    # 透传保真:CSV 首行 code→name 落库一致(改验保留的 biz_domains)。
+    import csv as _csv
+
+    with (REPO / "seeds" / "dict_biz_domains.csv").open(encoding="utf-8") as f:
+        first = next(_csv.DictReader(f))
+    row = pg.get(DictBizDomain, first["code"])
+    assert row is not None and row.name == first["name"]
 
 
 def test_transition_writes_event(pg, doc_version):

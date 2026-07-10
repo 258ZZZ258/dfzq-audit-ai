@@ -15,26 +15,33 @@ hnsw_ef_construction = 200      # ⚠ HNSW efConstruction
 upsert_batch = 500              # ⚠ 批量 upsert 条数
 
 [embedding]
-# env 覆盖:PIPELINE_EMBEDDING_MODE / OPENAI_BASE_URL / OPENAI_API_KEY / HF_HOME
-mode = "local"                  # local | endpoint(M1 默认 local)
+# env 覆盖:PIPELINE_EMBEDDING_MODE / PIPELINE_EMBEDDING_BASE_URL(优先)/ OPENAI_BASE_URL /
+#          PIPELINE_EMBEDDING_API_KEY(优先)/ OPENAI_API_KEY / PIPELINE_EMBEDDING_ENDPOINT_MODEL / HF_HOME
+mode = "local"                  # local(本地 BGE-M3)| endpoint(BGE 系远程,dense+sparse 保混合)
 model_name = "BAAI/bge-m3"
-batch_size = 64                 # ⚠
-max_length = 1024               # ⚠
+batch_size = 64                 # ⚠(endpoint 模式:每请求 input 条数)
+max_length = 1024               # ⚠(仅 local 分词截断;endpoint 由服务端处理)
 retries = 3                     # ⚠ 指数退避次数
+# ── mode="endpoint" 时的 BGE 系远程契约(字段可配以适配 TEI/Xinference/vLLM;base_url/key 走 env)──
+endpoint_path = "/embeddings"        # ⚠ base_url 后拼接路径
+# endpoint_model = "bge-m3"          # ⚠ 网关注册名;缺省回落 model_name
+endpoint_dense_field = "embedding"   # ⚠ 响应逐条 dense 字段名(部分服务用 dense/dense_vecs)
+endpoint_sparse_field = "sparse_embedding"  # ⚠ 响应 sparse 字段(dict{token_id:权重} 或 [{index,value}])
+endpoint_timeout = 60.0              # ⚠ 单请求超时(秒)
 
 [object_store]
-root = "./_objectstore"
+backend = "local"               # local(本地 FS)| minio(S3 兼容;上传/内网部署)
+root = "./_objectstore"         # local 后端根目录
+# ── backend="minio"(creds 走 env MINIO_ACCESS_KEY/SECRET_KEY,绝不入库)──
+# env:PIPELINE_OBJECT_STORE_BACKEND / MINIO_ENDPOINT / MINIO_BUCKET / MINIO_SECURE
+# minio_endpoint = "127.0.0.1:9000"
+# minio_bucket = "audit-uploads"
+minio_secure = false            # https?
 
 [toggles]
-l2_enabled = false              # L2 业务域 LLM 打标(§7.1,T2.3);默认关,开时经 env 提供 OPENAI_API_KEY
-e1_enabled = true               # E1 义务预打标默认开(零 LLM 正则)
-e2_enabled = false              # E2 LLM 打标(事项/部门/实体类型);默认关,开时经 env 提供 OPENAI_API_KEY
-case_l2_enabled = false         # 案例 L2(引用外规对齐 + 违规事由分类,§9);默认关,开时经 env 提供 OPENAI_API_KEY
+# E1 义务预打标(零 LLM 正则)默认开。LLM 富集(E2/L2/case_l2)已整段移除,相关开关随之删除。
+e1_enabled = true
 auto_confirm_meta_no_conflict = true # 无元数据冲突时自动放行 META_REVIEW(演示体验开关)
-
-[llm]
-# E2/L2 LLM 辅助(默认关)。key/base_url 走 env(OPENAI_API_KEY / OPENAI_BASE_URL),绝不入库。
-model = "gpt-5.4-nano"          # ⚠ env OPENAI_MODEL 可覆盖
 
 [align]
 header_band_pct = 0.08          # ⚠ 顶部页眉带占页高比例
@@ -65,5 +72,10 @@ sufficiency_min_hits = 1    # ⚠ 事项分区内充分判据最少命中(§8.1 
 attach_cases = true         # ⚠ R1 依据答复尾挂相关案例卡(§6.3 附挂通道);false 可关
 attach_topk = 3             # ⚠ 附挂案例卡条数(§6.3 top3)
 llm_backend = "stub"        # stub(零网络)| gateway(OpenAI 兼容);env QUERY_LLM_BACKEND 覆盖
-rerank_backend = "none"     # none(用 RRF 序)| bge(bge-reranker,需本地模型);env QUERY_RERANK_BACKEND 覆盖
+rerank_backend = "none"     # none(RRF 序)| bge(本地 bge-reranker)| api(远程 /rerank);env QUERY_RERANK_BACKEND 覆盖
+rerank_model = "BAAI/bge-reranker-v2-m3"  # ⚠ bge 本地模型名/路径 或 api 网关注册名;env QUERY_RERANK_MODEL 覆盖
+# ── rerank_backend="api" 时的 Jina/Cohere 风远程重排(base_url/key 走 env,绝不入库)──
+# env:QUERY_RERANK_BASE_URL / QUERY_RERANK_API_KEY / QUERY_RERANK_PATH
+rerank_endpoint_path = "/rerank"  # ⚠ base_url 后拼接路径
+# rerank_endpoint_top_n = 8       # ⚠ 请求 top_n(缺省不限,返回全部重排;缺项候选补回原序不丢)
 llm_model = "gpt-5.4-nano"  # ⚠ gateway 时模型名;env OPENAI_MODEL 可覆盖

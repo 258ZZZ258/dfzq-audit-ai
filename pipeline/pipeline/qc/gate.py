@@ -39,7 +39,13 @@ class QcReport:
 
 
 def evaluate(
-    ir: IRDocument, thresholds: QcThresholds, corpus_type: str = "P-INT"
+    ir: IRDocument, thresholds: QcThresholds, corpus_type: str = "P-INT", profile=None
 ) -> QcReport:
-    """按 corpus_type 选指标集跑 QC;P-INT/P-EXT/未知 → 条款树全七项,P-QA → 问答四项。"""
-    return QcReport([fn(ir, thresholds) for fn in indicators_for(corpus_type)])
+    """按 corpus_type 选指标集跑 QC(profile 配置优先,缺失回退硬编码默认,CP-010 T1)。
+
+    profile.qc_threshold_overrides 以**副本**覆盖阈值(model_copy),不污染全局 Settings。
+    """
+    overrides = getattr(profile, "qc_threshold_overrides", None)
+    if overrides:
+        thresholds = thresholds.model_copy(update=overrides)
+    return QcReport([fn(ir, thresholds) for fn in indicators_for(corpus_type, profile)])

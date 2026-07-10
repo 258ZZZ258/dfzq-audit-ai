@@ -37,33 +37,35 @@ class MilvusConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     mode: Literal["local", "endpoint"]
     model_name: str
-    batch_size: int  # ⚠
-    max_length: int  # ⚠
-    retries: int  # ⚠ 指数退避次数
+    batch_size: int  # ⚠(endpoint 模式:每请求 input 条数)
+    max_length: int  # ⚠(仅 local 分词截断;endpoint 由服务端处理)
+    retries: int  # ⚠ 指数退避次数(local/endpoint 共用)
     cache_dir: str | None = None  # HF_HOME(env 注入,离线缓存)
-    endpoint_base_url: str | None = None  # OPENAI_BASE_URL(env)
-    endpoint_api_key: str | None = None  # OPENAI_API_KEY(env)
+    # ── endpoint 模式(BGE 系远程 dense+sparse 契约;字段/路径可配以适配 TEI/Xinference/vLLM 等)──
+    # base_url/api_key 走 env(内网嵌入服务常与 LLM 服务分离:PIPELINE_EMBEDDING_BASE_URL 优先)。
+    endpoint_base_url: str | None = None  # OPENAI_BASE_URL / PIPELINE_EMBEDDING_BASE_URL(env)
+    endpoint_api_key: str | None = None  # OPENAI_API_KEY / PIPELINE_EMBEDDING_API_KEY(env,绝不入库)
+    endpoint_path: str = "/embeddings"  # ⚠ base_url 后拼接路径
+    endpoint_model: str | None = None  # ⚠ 请求 model 名(网关注册名);None → 回落 model_name
+    endpoint_dense_field: str = "embedding"  # ⚠ 响应逐条 dense 向量字段名
+    # ⚠ 响应 sparse 字段名;值兼容 {token_id:权重} dict 或 [{index,value}] 列表(TEI 风)
+    endpoint_sparse_field: str = "sparse_embedding"
+    endpoint_timeout: float = 60.0  # ⚠ 单请求超时(秒)
 
 
 class ObjectStoreConfig(BaseModel):
-    root: str
+    root: str  # local 后端根目录
+    backend: Literal["local", "minio"] = "local"  # env PIPELINE_OBJECT_STORE_BACKEND
+    # ── backend=minio(S3 兼容;上传/内网部署)。creds 走 env MINIO_ACCESS_KEY/SECRET_KEY,绝不入库 ──
+    minio_endpoint: str | None = None  # env MINIO_ENDPOINT(host:port)
+    minio_bucket: str | None = None  # env MINIO_BUCKET
+    minio_secure: bool = False  # https?;env MINIO_SECURE
 
 
 class TogglesConfig(BaseModel):
-    l2_enabled: bool  # M1 默认 false(零 LLM)
+    # E1 义务预打标(零 LLM 正则)。LLM 富集(E2/L2/case_l2)已整段移除,相关开关随之删除。
     e1_enabled: bool
-    e2_enabled: bool = False  # E2 LLM 打标(事项/部门/实体类型);默认关 → 零 LLM
-    case_l2_enabled: bool = False  # 案例 L2(引用外规对齐 + 违规事由分类);默认关 → 零 LLM
     auto_confirm_meta_no_conflict: bool = False
-
-
-class LlmConfig(BaseModel):
-    """E2/L2 LLM 辅助(默认关)。key/base_url 走 env(OPENAI_API_KEY/OPENAI_BASE_URL),不入库。"""
-
-    model: str = "gpt-5.4-nano"  # ⚠ env OPENAI_MODEL 可覆盖;E2/L2/案例分类共用(高频→低成本档)
-    # ⚠ 案例 L2(T2.1 引用外规抽取+对齐=全管线最高价值字段)单独模型档;None → 回落 model
-    # (add-only:不设即沿用旧行为)。案例量小,整段 case_l2 上强推理档成本可忽略。
-    case_l2_model: str | None = None
 
 
 class AlignConfig(BaseModel):
@@ -119,7 +121,16 @@ class ObligationConfig(BaseModel):
 
 
 class ProfileConfig(BaseModel):
-    sampling_rate: float  # 抽检率:M1 保留字段,不消费
+    """per-profile 档案(CP-010 T1 配置缝:QC 启用集/阈值覆盖/案例引用来源进 yaml)。
+
+    qc_indicators=None(旧 yaml 形态)→ 回退 indicators._DEFAULT_PROFILE_INDICATORS 硬编码默认,
+    保证既有四 profile 与配置缺失场景行为零变更(对拍测试 test_preseg_profiles_seam)。
+    """
+
+    qc_indicators: list[str] | None = None  # S2 启用集(INDICATOR_REGISTRY 名);None=硬编码默认
+    qc_threshold_overrides: dict[str, float] = {}  # 对 QcThresholds 字段的 per-profile 覆盖
+    # 案例引用来源:structured(预切块直装)| 其它值=自建通道规则抽取(零 LLM;case_l2 已移除)
+    case_ref_source: str = "rule"
 
 
 class Settings(BaseModel):
@@ -128,7 +139,6 @@ class Settings(BaseModel):
     embedding: EmbeddingConfig
     object_store: ObjectStoreConfig
     toggles: TogglesConfig
-    llm: LlmConfig = LlmConfig()
     align: AlignConfig
     parse: ParseConfig
     chunk: ChunkConfig
@@ -153,12 +163,25 @@ def _apply_env(raw: dict) -> None:
         emb["model_name"] = env["PIPELINE_EMBEDDING_MODEL"]
     if "OPENAI_BASE_URL" in env:
         emb["endpoint_base_url"] = env["OPENAI_BASE_URL"]
+    if "PIPELINE_EMBEDDING_BASE_URL" in env:  # 专用,优先于 OPENAI_BASE_URL(嵌入服务常独立部署)
+        emb["endpoint_base_url"] = env["PIPELINE_EMBEDDING_BASE_URL"]
     if "OPENAI_API_KEY" in env:
         emb["endpoint_api_key"] = env["OPENAI_API_KEY"]
+    if "PIPELINE_EMBEDDING_API_KEY" in env:  # 专用嵌入端点 key,优先于 OPENAI_API_KEY(绝不入库)
+        emb["endpoint_api_key"] = env["PIPELINE_EMBEDDING_API_KEY"]
+    if "PIPELINE_EMBEDDING_ENDPOINT_MODEL" in env:  # 网关注册的嵌入 model 名
+        emb["endpoint_model"] = env["PIPELINE_EMBEDDING_ENDPOINT_MODEL"]
     if "HF_HOME" in env:
         emb["cache_dir"] = env["HF_HOME"]
-    if "OPENAI_MODEL" in env:  # E2/L2 LLM 模型名 env 覆盖
-        raw.setdefault("llm", {})["model"] = env["OPENAI_MODEL"]
+    os_ = raw.setdefault("object_store", {})
+    if "PIPELINE_OBJECT_STORE_BACKEND" in env:
+        os_["backend"] = env["PIPELINE_OBJECT_STORE_BACKEND"]
+    if "MINIO_ENDPOINT" in env:
+        os_["minio_endpoint"] = env["MINIO_ENDPOINT"]
+    if "MINIO_BUCKET" in env:
+        os_["minio_bucket"] = env["MINIO_BUCKET"]
+    if "MINIO_SECURE" in env:
+        os_["minio_secure"] = env["MINIO_SECURE"]  # "0"/"1" → pydantic bool 强转
 
 
 def load_config(config_dir: str | os.PathLike | None = None) -> Settings:
@@ -183,7 +206,6 @@ def load_config(config_dir: str | os.PathLike | None = None) -> Settings:
         embedding=EmbeddingConfig(**settings_raw["embedding"]),
         object_store=ObjectStoreConfig(**settings_raw["object_store"]),
         toggles=TogglesConfig(**settings_raw["toggles"]),
-        llm=LlmConfig(**settings_raw.get("llm", {})),
         align=AlignConfig(**settings_raw["align"]),
         parse=ParseConfig(**settings_raw["parse"]),
         chunk=ChunkConfig(**settings_raw["chunk"]),

@@ -1,14 +1,17 @@
-"""§5.5 重排接缝:Protocol + demo 默认(none passthrough)+ 本地 bge-reranker + factory。
+"""§5.5 重排接缝:Protocol + demo 默认(none passthrough)+ 本地 bge-reranker + 远程 api + factory。
 
 镜像 ``llm/client.py`` / ``embedding_client`` 接缝。``none`` **默认** = passthrough(保 RRF 序,
-``rerank=none`` byte 等价);``bge`` = 本地 ``FlagReranker`` 懒载(同 BGE-M3,首次 rerank 时载)。
-候选按 ``.text`` 做 cross-encoder 打分。加载失败**抛、不静默退化 none**(避免误以为重排了)。
+``rerank=none`` byte 等价);``bge`` = 本地 ``FlagReranker`` 懒载(同 BGE-M3,首次 rerank 时载);
+``api`` = Jina/Cohere 风远程 ``/rerank`` 端点(甲方内网 BGE-reranker 网关对齐)。候选按 ``.text``
+做 cross-encoder 打分。加载/调用失败**抛、不静默退化 none**(避免误以为重排了)。
 模块级零 pipeline 导入(候选按 ``.text`` 鸭子类型,不引 ``Candidate``)。
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+import httpx
 
 
 @runtime_checkable
@@ -71,6 +74,70 @@ class BGEReranker:
         return [c for _, c in order]
 
 
+class APIReranker:
+    """Jina/Cohere 风远程重排端点(``POST {base_url}{path}``,甲方内网 BGE-reranker 网关对齐)。
+
+    请求 ``{model, query, documents:[...], top_n?}`` → ``{results:[{index, relevance_score}]}``。
+    按 ``relevance_score`` 降序重排候选(候选按 ``.text`` 取文本);``top_n`` 截断致缺项候选补回
+    原序(**不丢候选**,与 ``bge`` 全量重排语义一致)。构造期校验 ``base_url``(fail-fast)。
+    ``_rank`` 为打分接缝(单测 monkeypatch ``httpx.post`` 免网络)。
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None,
+        model: str,
+        api_key: str | None = None,
+        path: str = "/rerank",
+        top_n: int | None = None,
+        timeout: float = 60.0,
+    ) -> None:
+        if not base_url:
+            raise ValueError(
+                "rerank_backend=api 需 base_url"
+                "(env QUERY_RERANK_BASE_URL 或 [query].rerank_endpoint_base_url)"
+            )
+        self._url = base_url.rstrip("/") + path
+        self._model = model
+        self._api_key = api_key
+        self._top_n = top_n
+        self._timeout = timeout
+
+    def _rank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
+        """→ ``[(index, score)]`` 按 score 降序。HTTP 接缝(单测 mock ``httpx.post``)。"""
+        payload: dict = {"model": self._model, "query": query, "documents": documents}
+        if self._top_n:
+            payload["top_n"] = self._top_n
+        headers = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        resp = httpx.post(self._url, headers=headers, json=payload, timeout=self._timeout)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        pairs = [(int(r["index"]), float(r["relevance_score"])) for r in results]
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        return pairs
+
+    def rerank(self, query: str, candidates: list) -> list:
+        if not candidates:
+            return candidates
+        docs = [getattr(c, "text", None) or "" for c in candidates]
+        pairs = self._rank(query, docs)
+        if not pairs:  # 空结果 → 保原序,不静默丢候选
+            return candidates
+        seen: set[int] = set()
+        ordered = []
+        for i, _ in pairs:
+            if 0 <= i < len(candidates) and i not in seen:
+                ordered.append(candidates[i])
+                seen.add(i)
+        for i, c in enumerate(candidates):  # top_n 截断时未返回的候选补回原序
+            if i not in seen:
+                ordered.append(c)
+        return ordered
+
+
 def make_reranker(qcfg) -> RerankerClient:
     """按 ``qcfg.rerank_backend``(默认 none)返回实现(同 LLM/embedding factory)。"""
     backend = getattr(qcfg, "rerank_backend", "none")
@@ -78,4 +145,12 @@ def make_reranker(qcfg) -> RerankerClient:
         return NoneReranker()
     if backend == "bge":
         return BGEReranker(getattr(qcfg, "rerank_model", "BAAI/bge-reranker-v2-m3"))
-    raise ValueError(f"未知 QUERY_RERANK_BACKEND: {backend!r}(none | bge)")
+    if backend == "api":
+        return APIReranker(
+            base_url=getattr(qcfg, "rerank_endpoint_base_url", None),
+            model=getattr(qcfg, "rerank_model", "BAAI/bge-reranker-v2-m3"),
+            api_key=getattr(qcfg, "rerank_endpoint_api_key", None),
+            path=getattr(qcfg, "rerank_endpoint_path", "/rerank"),
+            top_n=getattr(qcfg, "rerank_endpoint_top_n", None),
+        )
+    raise ValueError(f"未知 QUERY_RERANK_BACKEND: {backend!r}(none | bge | api)")

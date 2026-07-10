@@ -21,6 +21,7 @@ class SourceFormat(StrEnum):
     XLSX = "xlsx"  # 表格直读(openpyxl → Table 块);add-only
     JPG = "jpg"  # 图片扫描件 OCR(MinerU);add-only
     PNG = "png"
+    PRESEG = "preseg"  # P-PRESEG 预切块源(CP-010):S1 装载合成 IR,非文件解析;add-only
 
 
 class BlockType(StrEnum):
