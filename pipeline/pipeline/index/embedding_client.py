@@ -117,13 +117,24 @@ def _normalize_sparse(raw: Any) -> dict[str, float]:
 
 
 def _extract_rows(data: Any, n: int) -> list[dict]:
-    """从响应取逐条结果(``data`` 或 ``embeddings`` 或裸列表),按 ``index`` 排序,校验条数。"""
+    """从响应取逐条结果(``data`` 或 ``embeddings`` 或裸列表),按 ``index`` 严格对齐、校验条数。
+
+    ``index`` 若出现,必须**每条都有、为整数、且恰构成 0..n-1 完整排列**——否则按序对齐会把向量
+    错配到别的文本(静默检索污染)。部分缺 / 非整数 / 重复 / 缺号一律拒绝,绝不静默(Codex)。
+    """
     rows = data.get("data") or data.get("embeddings") if isinstance(data, dict) else data
     if not isinstance(rows, list):
         raise ValueError(f"endpoint 响应无法解析出结果列表:{type(rows).__name__}")
     if len(rows) != n:
         raise ValueError(f"endpoint 响应条数不符:请求 {n} 得 {len(rows)}")
-    if all(isinstance(r, dict) and "index" in r for r in rows):
+    has_index = [isinstance(r, dict) and "index" in r for r in rows]
+    if any(has_index):
+        if not all(has_index) or not all(
+            isinstance(r["index"], int) and not isinstance(r["index"], bool) for r in rows
+        ):
+            raise ValueError("endpoint 响应部分条目缺 index 或非整数,无法可靠对齐输入序")
+        if sorted(r["index"] for r in rows) != list(range(n)):
+            raise ValueError(f"endpoint 响应 index 非 0..{n - 1} 完整排列(乱序/重复/缺号)")
         rows = sorted(rows, key=lambda r: r["index"])  # 服务端乱序 → 按 index 恢复入参序
     return rows
 

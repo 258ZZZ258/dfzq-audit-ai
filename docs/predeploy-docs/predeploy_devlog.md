@@ -166,3 +166,25 @@ Codex 按 `origin/main...HEAD` 全量审计出 2 Required(F1/F2)+ 1「需确认�
 - **验证**:`test_minio_object_store`(9)/`test_preseg_s0`(6,连真 PG)/`test_preseg_ingest_entry`(5,零栈
   monkeypatch)+ 相邻 object_store/ondemand/s0 共 47 passed;`python -m pipeline.preseg_ingest --help` 正常;
   ruff 绿。端到端 REGISTERED→INDEXED 仍由模型门 `test_preseg_e2e` 覆盖。
+
+## 2026-07-10(续)Codex 三条数据完整性 review 修复
+
+三处「静默错误」类隐患——不崩、但会悄悄丢数据/污染检索/错解坏输入,危害大于显式崩溃。逐项修 + 回归测:
+
+- **content_hash 未与实际块内容核验 → 变化件被静默丢弃**(`s0_register._register_one_preseg`):源幂等去重用
+  manifest 声明的 `content_hash`,且**读 blocks 前**就返回 DUPLICATE。若源改了内容却没更新 content_hash
+  (源幂等键失真),变化件被当重复丢弃、永不入库。→ dedup 命中时**交叉核验**实际块 `sha256` vs 现存版
+  `source_hash`:一致才真 DUPLICATE;不一致 → 置 reason 走**隔离**(非静默丢),并经 `_latest_by_source_id`
+  版本链 `revise_replace` 替代旧版供人工核实。回归测 `test_content_hash_stale_content_changed_quarantines`。
+  **非显然**:块字节提前读一次算 `actual_hash`,同值复用给 DocVersion.source_hash(不重算);blocks 契约违约的
+  except 用 `reason = reason or …` 不覆盖 hash 失真 reason。
+- **远程嵌入响应未严格校验 index → 向量错配文本**(`embedding_client._extract_rows`):原仅「全部有 index 才
+  排序」、且**不校验 index 是否恰为 0..n-1 排列**。部分缺 index / 重复 / 缺号 → 按序对齐把向量挂到别的文本,
+  静默检索污染(难察觉)。→ index 一旦出现:**每条都须有、为整数(排除 bool)、且构成完整排列**,否则抛错。
+  回归测:乱序复位 / 重复 / 缺号 / 部分缺 index 四例。
+- **预切块 reader 接受错误字段类型 → 后续崩或错解**(`preseg/reader.py`):`is_table=bool(...)` 把字符串
+  `"false"` 判成 True(错解表格);`clause_label`/`title` 非字符串照存(下游 normalize 崩);
+  `violated_regulations`/`tags` 非 list 不拦(enumerate 遍历键/字符生成垃圾)。→ 补类型校验,坏类型**整文件
+  拒收**(行级汇总)。附带修 `block_seq=true`(bool 是 int 子类)被当 1 混入。回归测 7 例(blocks 3 + cases 4)。
+- **验证**:三处测试 42 passed;相邻 preseg 链 + embedding 81 passed / 7 skipped(模型门);ruff 绿;
+  全仓 599 tests 收集 0 error。属 PR#47 上 Codex 第二轮 review。

@@ -315,20 +315,29 @@ def _register_one_preseg(
 
     sid = str(row["source_doc_id"]).strip()
     chash = str(row["content_hash"]).strip()
+    data = blocks_path.read_bytes()
+    actual_hash = hashlib.sha256(data).hexdigest()
+    reason, ecode = None, None
+
     dup = _find_by_source_key(ctx, sid, chash)
-    if dup is not None:  # 幂等:同源主键 + 同内容哈希 → 不重登
-        _record_duplicate(ctx, dup, batch_id, fn)
-        report.warnings.append(f"{fn}: 源幂等键重复,关联 {dup.doc_version_id}")
-        return FileOutcome(
-            fn, "DUPLICATE", doc_version_id=dup.doc_version_id, reason="源幂等键重复"
+    if dup is not None:
+        if dup.source_hash == actual_hash:  # 真幂等:声明 hash + 实际块内容都一致 → 不重登
+            _record_duplicate(ctx, dup, batch_id, fn)
+            report.warnings.append(f"{fn}: 源幂等键重复,关联 {dup.doc_version_id}")
+            return FileOutcome(
+                fn, "DUPLICATE", doc_version_id=dup.doc_version_id, reason="源幂等键重复"
+            )
+        # content_hash 声称相同但实际块字节已变 → 源幂等键失真(源改内容未更新哈希)。绝不静默
+        # 丢弃变化件(Codex):置 reason → 走隔离供人工核实,并经 _latest_by_source_id 版本链替代旧版。
+        reason = (
+            f"content_hash={chash} 与实际块内容不一致(源未随内容更新哈希);"
+            f"关联现存版本 {dup.doc_version_id},隔离待人工核实"
         )
 
-    data = blocks_path.read_bytes()
-    reason, ecode = None, None
     try:
         read_blocks(blocks_path)  # 契约校验(违约 → 隔离供人工,不带病进管线)
     except PresegFormatError as e:
-        reason = f"preseg blocks 契约违约:{e}"
+        reason = reason or f"preseg blocks 契约违约:{e}"  # 已置(hash 失真)则不覆盖
     perm = str(row.get("perm_tag") or "")
     if reason is None and not perm:
         reason = "密级缺失"
@@ -378,7 +387,7 @@ def _register_one_preseg(
                 logical_id=logical_id,
                 batch_id=batch_id,
                 source_format="preseg",  # 通道标识(非文件格式;reader 口径钉子)
-                source_hash=hashlib.sha256(data).hexdigest(),
+                source_hash=actual_hash,  # 实际块字节 sha256(dedup 交叉核验用同一值)
                 raw_object_key=raw_key,
                 source_filename=fn,
                 pipeline_status=status.value,

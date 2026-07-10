@@ -6,6 +6,7 @@ blocks 契约违约隔离/manifest 列集整批拒收/案例虚拟文档合成(D
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -152,6 +153,46 @@ def test_content_hash_change_autochains(reg, tmp_path):
         assert dv.version_relation == "revise_replace"
         assert dv.supersedes_version_id == old.doc_version_id
         assert dv.logical_id == old.logical_id  # 内容延续,继承 logical
+    assert _by_fn(r2, "int-001").status == "DUPLICATE"  # 未变件照常幂等
+
+
+def test_content_hash_stale_content_changed_quarantines(reg, tmp_path):
+    # content_hash 声称不变、但实际块字节已变(源改内容未更新哈希)→ 绝不静默判 DUPLICATE 丢弃;
+    # 交叉核验 source_hash 不符 → 隔离供人工,并版本链替代旧版(Codex)。
+    ctx, _, batches = reg
+    bid1, bid2 = "preseg-t5-stale-a", "preseg-t5-stale-b"
+    batches.extend([bid1, bid2])
+    r1 = register_preseg_batch(ctx, bid1, FIXTURES, FIXTURES / "manifest.xlsx")
+    old = _by_fn(r1, "ext-001")
+    assert old.status == "REGISTERED"
+
+    # 复制批次:content_hash 保持不变,但改 blocks/ext-001 首块 text(实际内容变)+ 去 cases 干扰
+    batch2 = tmp_path / "stale"
+    shutil.copytree(FIXTURES, batch2)
+    (batch2 / "cases.jsonl").unlink()
+    blk = batch2 / "blocks" / "ext-001.jsonl"
+    lines = blk.read_text(encoding="utf-8").splitlines()
+    rec0 = json.loads(lines[0])
+    rec0["text"] = str(rec0.get("text", "")) + "(源侧偷偷改了内容但没更新 content_hash)"
+    lines[0] = json.dumps(rec0, ensure_ascii=False)
+    blk.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    r2 = register_preseg_batch(ctx, bid2, batch2, batch2 / "manifest.xlsx")
+    changed = _by_fn(r2, "ext-001")
+    assert changed.status == "QUARANTINED" and "不一致" in changed.reason  # 未判 DUPLICATE
+    assert changed.doc_version_id != old.doc_version_id  # 变化件入库(未丢弃)
+    with ctx.db.session() as s:
+        dv = s.get(DocVersion, changed.doc_version_id)
+        assert dv.pipeline_status == "QUARANTINED"
+        assert dv.version_relation == "revise_replace"
+        assert dv.supersedes_version_id == old.doc_version_id  # 版本链替代旧版
+        q = s.scalars(
+            select(ReviewQueue).where(
+                ReviewQueue.doc_version_id == changed.doc_version_id,
+                ReviewQueue.queue_type == "quarantine",
+            )
+        ).all()
+        assert len(q) == 1  # 进人工隔离队列
     assert _by_fn(r2, "int-001").status == "DUPLICATE"  # 未变件照常幂等
 
 

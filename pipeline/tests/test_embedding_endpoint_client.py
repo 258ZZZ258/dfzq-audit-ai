@@ -148,3 +148,55 @@ def test_row_count_mismatch_raises(monkeypatch):
     monkeypatch.setattr(ec.httpx, "post", fake_post)
     with pytest.raises(ValueError, match="条数"):
         EndpointClient(_endpoint_cfg()).embed(["x", "y"])  # 请求 2 条
+
+
+def test_out_of_order_index_realigned(monkeypatch):
+    # 服务端乱序返回 → 按 index 复位,向量与输入序严格对齐(不错配)
+    def fake_post(url, *, headers, json, timeout):
+        return _FakeResp({"data": [
+            {"index": 1, "embedding": [1.0], "sparse_embedding": {}},
+            {"index": 0, "embedding": [0.0], "sparse_embedding": {}},
+        ]})
+
+    monkeypatch.setattr(ec.httpx, "post", fake_post)
+    out = EndpointClient(_endpoint_cfg()).embed(["a", "b"])
+    assert out[0].dense == [0.0] and out[1].dense == [1.0]  # index 0→"a"、1→"b"
+
+
+def test_duplicate_index_raises(monkeypatch):
+    # index 重复(0,0)→ 非完整排列,拒绝(否则某输入的向量被覆盖/错配)
+    def fake_post(url, *, headers, json, timeout):
+        return _FakeResp({"data": [
+            {"index": 0, "embedding": [1.0], "sparse_embedding": {}},
+            {"index": 0, "embedding": [2.0], "sparse_embedding": {}},
+        ]})
+
+    monkeypatch.setattr(ec.httpx, "post", fake_post)
+    with pytest.raises(ValueError, match="排列"):
+        EndpointClient(_endpoint_cfg()).embed(["a", "b"])
+
+
+def test_index_gap_raises(monkeypatch):
+    # index 缺号(0,2 缺 1)→ 拒绝
+    def fake_post(url, *, headers, json, timeout):
+        return _FakeResp({"data": [
+            {"index": 0, "embedding": [1.0], "sparse_embedding": {}},
+            {"index": 2, "embedding": [2.0], "sparse_embedding": {}},
+        ]})
+
+    monkeypatch.setattr(ec.httpx, "post", fake_post)
+    with pytest.raises(ValueError, match="排列"):
+        EndpointClient(_endpoint_cfg()).embed(["a", "b"])
+
+
+def test_partial_index_raises(monkeypatch):
+    # 部分条目有 index、部分没有 → 无法可靠对齐,拒绝
+    def fake_post(url, *, headers, json, timeout):
+        return _FakeResp({"data": [
+            {"index": 0, "embedding": [1.0], "sparse_embedding": {}},
+            {"embedding": [2.0], "sparse_embedding": {}},
+        ]})
+
+    monkeypatch.setattr(ec.httpx, "post", fake_post)
+    with pytest.raises(ValueError, match="index"):
+        EndpointClient(_endpoint_cfg()).embed(["a", "b"])

@@ -114,7 +114,10 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
     for lineno, rec in records:
         seq = rec.get("block_seq")
         blk_text = rec.get("text")
-        if not isinstance(seq, int):
+        clause_label = rec.get("clause_label")
+        is_table = rec.get("is_table", False)
+        # bool 是 int 子类:显式排除,否则 block_seq=true 会被当 1 混入(错序/重号)
+        if not isinstance(seq, int) or isinstance(seq, bool):
             errors.append(f"line {lineno}: block_seq 缺失或非整数")
             continue
         if seq in seen_seq:
@@ -123,13 +126,20 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
         if not isinstance(blk_text, str) or not blk_text.strip():
             errors.append(f"line {lineno}: text 缺失或为空")
             continue
+        if clause_label is not None and not isinstance(clause_label, str):
+            t = type(clause_label).__name__
+            errors.append(f"line {lineno}: clause_label 须为字符串(得 {t})")
+            continue
+        if not isinstance(is_table, bool):  # 勿 bool() 强转——"false"/0/[] 会被误判(错解表格)
+            errors.append(f"line {lineno}: is_table 须为布尔(得 {type(is_table).__name__})")
+            continue
         seen_seq.add(seq)
         blocks.append(
             PresegBlock(
                 block_seq=seq,
                 text=blk_text,
-                clause_label=rec.get("clause_label") or None,
-                is_table=bool(rec.get("is_table", False)),
+                clause_label=clause_label or None,
+                is_table=is_table,
             )
         )
     if errors:
@@ -146,23 +156,33 @@ def read_cases(path: Path) -> list[PresegCase]:
     errors: list[str] = []
     cases: list[PresegCase] = []
     for lineno, rec in records:
-        if not str(rec.get("case_name") or "").strip():
-            errors.append(f"line {lineno}: case_name 必填")
+        case_name = rec.get("case_name")
+        if not isinstance(case_name, str) or not case_name.strip():
+            errors.append(f"line {lineno}: case_name 必填且须为字符串")
             continue
         persons = rec.get("persons", [])
         if not isinstance(persons, list):
             errors.append(f"line {lineno}: persons 必须是 list")
             continue
+        tags = rec.get("tags", [])
+        if not isinstance(tags, list):  # 非 list(如 "a;b" 串)→ 后续检索/展示错解
+            errors.append(f"line {lineno}: tags 必须是 list")
+            continue
+        vregs_raw = rec.get("violated_regulations", [])
+        if not isinstance(vregs_raw, list):  # 非 list → enumerate 会遍历键/字符,静默生成垃圾
+            errors.append(f"line {lineno}: violated_regulations 必须是 list")
+            continue
         vregs: list[ViolatedReg] = []
         bad = False
-        for j, v in enumerate(rec.get("violated_regulations", [])):
-            if not str((v or {}).get("title") or "").strip():
-                errors.append(f"line {lineno}: violated_regulations[{j}].title 必填")
+        for j, v in enumerate(vregs_raw):
+            title = (v or {}).get("title") if isinstance(v, dict) else None
+            if not isinstance(title, str) or not title.strip():
+                errors.append(f"line {lineno}: violated_regulations[{j}].title 必填且须为字符串")
                 bad = True
                 break
             vregs.append(
                 ViolatedReg(
-                    title=v["title"],
+                    title=title,
                     clause_label=v.get("clause_label") or None,
                     content=v.get("content") or None,
                 )
@@ -171,7 +191,7 @@ def read_cases(path: Path) -> list[PresegCase]:
             continue
         cases.append(
             PresegCase(
-                case_name=rec["case_name"],
+                case_name=case_name,
                 source_case_id=str(rec.get("source_case_id") or "") or None,
                 record_hash=_record_hash(rec),
                 doc_number=rec.get("doc_number") or None,
@@ -182,7 +202,7 @@ def read_cases(path: Path) -> list[PresegCase]:
                 problem_summary=rec.get("problem_summary") or None,
                 description=rec.get("description") or None,
                 source_url=rec.get("source_url") or None,
-                tags=rec.get("tags") or [],
+                tags=tags,
                 violated_regulations=vregs,
                 persons=persons,
             )

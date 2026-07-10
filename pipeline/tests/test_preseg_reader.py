@@ -104,6 +104,27 @@ class TestBlocks:
         with pytest.raises(PresegFormatError, match="line 2"):
             read_blocks(p)
 
+    def test_non_bool_is_table_rejected(self, tmp_path):
+        # is_table 字符串 "false" 不得被 bool() 强转成 True(错解表格)→ 拒收
+        p = tmp_path / "t.jsonl"
+        p.write_text('{"block_seq": 0, "text": "a", "is_table": "false"}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="is_table"):
+            read_blocks(p)
+
+    def test_non_str_clause_label_rejected(self, tmp_path):
+        # clause_label 非字符串(数字)→ 后续 normalize 会崩/错解 → 拒收
+        p = tmp_path / "c.jsonl"
+        p.write_text('{"block_seq": 0, "text": "a", "clause_label": 21}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="clause_label"):
+            read_blocks(p)
+
+    def test_bool_block_seq_rejected(self, tmp_path):
+        # block_seq=true 是 int 子类,不得混入当 1 → 拒收
+        p = tmp_path / "b.jsonl"
+        p.write_text('{"block_seq": true, "text": "a"}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="block_seq"):
+            read_blocks(p)
+
 
 # ── cases JSONL ──────────────────────────────────────────────
 
@@ -141,4 +162,26 @@ class TestCases:
         p = tmp_path / "c.jsonl"
         p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
         with pytest.raises(PresegFormatError, match="persons"):
+            read_cases(p)
+
+    def test_violated_regulations_must_be_list(self, tmp_path):
+        # 非 list(如 dict)→ enumerate 会遍历键/字符静默生成垃圾 → 拒收
+        rec = {"case_name": "A", "violated_regulations": {"title": "《X》"}}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="violated_regulations"):
+            read_cases(p)
+
+    def test_tags_must_be_list(self, tmp_path):
+        rec = {"case_name": "A", "tags": "招揽;展业"}  # 串而非 list
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="tags"):
+            read_cases(p)
+
+    def test_non_str_violated_title_rejected(self, tmp_path):
+        rec = {"case_name": "A", "violated_regulations": [{"title": 123}]}  # title 非字符串
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="title"):
             read_cases(p)
