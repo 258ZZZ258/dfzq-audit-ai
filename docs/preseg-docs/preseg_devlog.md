@@ -1,7 +1,7 @@
 # preseg 模块开发记忆(CP-010 · 决策/踩坑/口径钉子)
 
 > 只记 git 给不了的。SDD 产物:SPEC/PLAN/TASKS/RTM-PRESEG 同目录;决策 D1–D10 主本在
-> 《调研报告》v0.2 §6(docs/制度查询智能体_预切块数据源适配_调研报告_v0_1.md)。
+> 《调研报告》v0.2 §6(docs/制度查询智能体_预切块数据源适配_调研报告_v0_2.md)。
 
 ## 2026-07-06 T1–T12 实施(worktree feat/preseg)
 
