@@ -211,3 +211,23 @@ Codex 按 `origin/main...HEAD` 全量审计出 2 Required(F1/F2)+ 1「需确认�
   `_register_one_preseg` 加 `fn != Path(fn).name` 单一文件名校验,非法 → `REJECTED`(新增 FileOutcome 状态)不建库。
 - **验证**:四条测试相关 78 passed;全仓 608 tests 收集 0 error;ruff 绿。端到端仍由模型门 `test_preseg_e2e` 覆盖。
   属 PR#47 Codex 第三轮 review。
+
+## 2026-07-10(四)Codex 四轮 review:非 UTF-8 JSONL 绕过隔离(最后一条阻塞)
+
+前三轮全部确认修复正确;仅剩一条输入错误路径缺口:
+
+- **非 UTF-8 JSONL 绕过隔离**:`read_blocks` / `_read_jsonl` 直接 `read_text(encoding="utf-8")`,非法编码抛
+  `UnicodeDecodeError`,而调用方只 `except PresegFormatError` → ① blocks 不按设计进 QUARANTINED;② cases 在普通
+  文档已登记后中止整批(部分写入);③ 命令以未处理异常退出而非出可审计拒收报告。→ ⑴ reader 加 `_read_text`:
+  `UnicodeDecodeError` 统一转 `PresegFormatError`(read_blocks / read_cases 两路都走);⑵ S0 blocks 改
+  `parse_blocks(data.decode("utf-8"), fn)` catch `(UnicodeDecodeError, PresegFormatError)`——**顺带消除 TOCTOU**
+  (原"读一份字节存储 + read_blocks 再读一份校验"两次读,文件可在两读间变;现单次读 data)。回归测:reader 层
+  blocks/cases 各一例;S0 集成两例(非 UTF-8 blocks→QUARANTINED;非 UTF-8 cases→整文件拒收 + 文档照登)。
+- **s1_parse 已安全**:装载路径 `parse_blocks(data.decode(...))` 早已 `except (PresegFormatError, UnicodeDecodeError,
+  ValueError)`(line 77)→ 优雅隔离,不在本次范围。
+- **部署注意(Codex,非阻塞)**:上轮把 preseg `source_hash` 从字节 sha 改为语义规范化哈希。若某环境曾用旧提交
+  写过 preseg 数据,其 `source_hash` 是字节哈希,升级后首次重跑会因哈希语义不同而 dedup 交叉核验判"内容变"→
+  误隔离一次。**但 preseg 尚未部署到任何真环境**(demo 栈的 b01-25 是 register_batch 非 preseg 路径)→ 无存量
+  preseg source_hash,不构成阻塞;真部署前若已有 preseg 数据则需清理/回填/兼容旧哈希。
+- **验证**:reader + s0 共 49 passed / 1 skipped(模型门);全仓 612 收集 0 error;ruff 绿。属 PR#47 Codex
+  第四轮 review——Codex 结论:修此条 + 补测试后即可进最终合并复审。

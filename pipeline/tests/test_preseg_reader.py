@@ -104,6 +104,13 @@ class TestBlocks:
         with pytest.raises(PresegFormatError, match="line 2"):
             read_blocks(p)
 
+    def test_non_utf8_blocks_rejected(self, tmp_path):
+        # 非法 UTF-8 → PresegFormatError(而非漏 UnicodeDecodeError 绕过隔离,Codex)
+        p = tmp_path / "bad_enc.jsonl"
+        p.write_bytes(b'{"block_seq": 0, "text": "\xff\xfe"}\n')
+        with pytest.raises(PresegFormatError, match="UTF-8"):
+            read_blocks(p)
+
     def test_non_bool_is_table_rejected(self, tmp_path):
         # is_table 字符串 "false" 不得被 bool() 强转成 True(错解表格)→ 拒收
         p = tmp_path / "t.jsonl"
@@ -216,4 +223,11 @@ class TestCases:
         p = tmp_path / "c.jsonl"
         p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
         with pytest.raises(PresegFormatError, match="content"):
+            read_cases(p)
+
+    def test_non_utf8_cases_rejected(self, tmp_path):
+        # 非法 UTF-8 → PresegFormatError(而非漏 UnicodeDecodeError 中止整批,Codex)
+        p = tmp_path / "bad_enc.jsonl"
+        p.write_bytes(b'{"case_name": "\xff\xfe"}\n')
+        with pytest.raises(PresegFormatError, match="UTF-8"):
             read_cases(p)

@@ -309,6 +309,35 @@ def test_bad_blocks_quarantined(reg, tmp_path):
         assert len(q) == 1
 
 
+def test_non_utf8_blocks_quarantined(reg, tmp_path):
+    # 非法 UTF-8 blocks → 按设计进 QUARANTINED(不漏 UnicodeDecodeError 崩批,Codex)
+    ctx, _, batches = reg
+    bid = "preseg-t5-badenc-blocks"
+    batches.append(bid)
+    batch = tmp_path / "badenc"
+    shutil.copytree(FIXTURES, batch)
+    (batch / "cases.jsonl").unlink()
+    (batch / "blocks" / "ext-001.jsonl").write_bytes(b'{"block_seq": 0, "text": "\xff\xfe"}\n')
+    report = register_preseg_batch(ctx, bid, batch, batch / "manifest.xlsx")  # 不抛
+    out = _by_fn(report, "ext-001")
+    assert out.status == "QUARANTINED" and "契约违约" in out.reason
+
+
+def test_non_utf8_cases_rejects_file_docs_kept(reg, tmp_path):
+    # 非法 UTF-8 cases.jsonl → 整文件拒收(warning),已登记文档不受影响(不中止批次/不部分写,Codex)
+    ctx, _, batches = reg
+    bid = "preseg-t5-badenc-cases"
+    batches.append(bid)
+    batch = tmp_path / "badenc_cases"
+    shutil.copytree(FIXTURES, batch)
+    (batch / "cases.jsonl").write_bytes(b'{"case_name": "\xff\xfe"}\n')
+    report = register_preseg_batch(ctx, bid, batch, batch / "manifest.xlsx")  # 不抛
+    assert _by_fn(report, "ext-001").status == "REGISTERED"  # 文档行照常登记
+    assert _by_fn(report, "int-001").status == "REGISTERED"
+    assert any("cases.jsonl 拒收" in w for w in report.warnings)
+    assert not any(o.filename.endswith("案") for o in report.outcomes)  # 无案例合成
+
+
 def test_manifest_mismatch_rejects_whole_batch(reg, tmp_path):
     ctx, _, batches = reg
     bid = "preseg-t5-reject"

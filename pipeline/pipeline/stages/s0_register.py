@@ -305,7 +305,7 @@ def _latest_by_source_id(ctx: StageContext, sid: str) -> DocVersion | None:
 def _register_one_preseg(
     ctx: StageContext, batch_id: str, batch_dir: Path, row: dict, report: RegisterReport
 ) -> FileOutcome:
-    from pipeline.preseg.reader import PresegFormatError, blocks_content_hash, read_blocks
+    from pipeline.preseg.reader import PresegFormatError, blocks_content_hash, parse_blocks
     from pipeline.preseg.status_map import map_effective_status
 
     fn = str(row["filename"])
@@ -325,9 +325,10 @@ def _register_one_preseg(
 
     # 契约校验 + 拿解析块算**语义规范化哈希**(非字节 sha):仅重格式化(空格/键序/换行)不改哈希,
     # 真实内容变化才改——对齐 SPEC content_hash 语义(字节 sha 会把纯重排误判为内容变而误隔离,Codex)。
+    # 直接解析已读的 data(单次读,消除"存储读一份、校验再读一份"的 TOCTOU);非法 UTF-8 也归隔离。
     try:
-        blocks = read_blocks(blocks_path)
-    except PresegFormatError as e:
+        blocks = parse_blocks(data.decode("utf-8"), fn)
+    except (UnicodeDecodeError, PresegFormatError) as e:
         blocks = None
         reason = f"preseg blocks 契约违约:{e}"
     content_fingerprint = (

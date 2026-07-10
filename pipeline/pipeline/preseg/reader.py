@@ -95,9 +95,17 @@ def validate_manifest_rows(rows: list[dict]) -> None:
         raise PresegFormatError("manifest 行级校验失败:\n" + "\n".join(errors))
 
 
+def _read_text(path: Path) -> str:
+    """读文件文本;非法 UTF-8 → PresegFormatError(而非漏 UnicodeDecodeError 绕过隔离/中止批次)。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise PresegFormatError(f"{path.name}: 非法 UTF-8 编码,无法解码({e})") from e
+
+
 def read_blocks(path: Path) -> list[PresegBlock]:
     """blocks JSONL 文件 → 块列表(见 parse_blocks)。"""
-    return parse_blocks(path.read_text(encoding="utf-8"), path.name)
+    return parse_blocks(_read_text(path), path.name)
 
 
 def parse_blocks(text: str, name: str) -> list[PresegBlock]:
@@ -275,7 +283,7 @@ def _record_hash(rec: dict) -> str:
 
 
 def _read_jsonl(path: Path) -> list[tuple[int, dict]]:
-    return _parse_jsonl(path.read_text(encoding="utf-8"), path.name)
+    return _parse_jsonl(_read_text(path), path.name)
 
 
 def _parse_jsonl(text: str, name: str) -> list[tuple[int, dict]]:
