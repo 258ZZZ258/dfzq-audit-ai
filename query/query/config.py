@@ -84,6 +84,10 @@ class QueryConfig(BaseModel):
     ]
     upload_dir: str | None = None  # ⚠ 附件上传目录;None → 系统临时目录/audit-query-uploads
     max_upload_bytes: int = 50 * 1024 * 1024  # ⚠ 上传大小上限(50MB,SPEC-API §8.4)
+    # ── 答复 TL;DR 综述(API 富集层,非路由/域;SPEC-API [query.enrich])──
+    summary_llm: bool = False  # ⚠ 用 LLM 提炼整段答复摘要;默认关 → 抽取式/模板兜底(零网络)
+    summary_model: str | None = None  # ⚠ 摘要模型;None → 复用 llm_model(env QUERY_SUMMARY_MODEL)
+    summary_max_chars: int = 120  # ⚠ 摘要字数上限(抽取/LLM 都封顶)
 
 
 def _apply_env(raw: dict) -> None:
@@ -128,6 +132,10 @@ def _apply_env(raw: dict) -> None:
         raw["scenario_expand"] = env["QUERY_SCENARIO_EXPAND"]
     if "QUERY_SCENARIO_TERMS_PATH" in env:
         raw["scenario_terms_path"] = env["QUERY_SCENARIO_TERMS_PATH"]
+    if "QUERY_SUMMARY_LLM" in env:
+        raw["summary_llm"] = env["QUERY_SUMMARY_LLM"]  # "0"/"1" → pydantic bool 强转
+    if "QUERY_SUMMARY_MODEL" in env:
+        raw["summary_model"] = env["QUERY_SUMMARY_MODEL"]
 
 
 def load_query_config(config_dir: str | os.PathLike | None = None) -> QueryConfig:

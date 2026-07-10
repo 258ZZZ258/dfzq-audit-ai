@@ -75,7 +75,10 @@ class FakeStore:
 
 
 def _svc(route, result, structured):
-    agent = SimpleNamespace(route_only=lambda q: route, ask=lambda q, history=None: result)
+    agent = SimpleNamespace(
+        route_only=lambda q: route, ask=lambda q, history=None: result,
+        summarize=lambda result: None,  # API 富集层接口(默认关 → None)
+    )
     return SimpleNamespace(
         agent=agent, store=FakeStore(), structured_for=lambda q, **kw: structured,
         uploads={}, retriever=None, pg=None, llm=None,

@@ -76,6 +76,7 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
             "elapsed_ms": elapsed_ms, "total_hits": sum(hit_counts.values()),
             "hit_counts": hit_counts,
         }
+        result.summary = svc.agent.summarize(result)  # 全块生成后算 TL;DR(终帧交付)
         _append_assistant(svc, cid, result, hit_counts, elapsed_ms, mid)   # user 已落,仅补答复
 
         yield format_sse("done", {
@@ -83,7 +84,7 @@ def stream_ask(svc, cid, query, history, *, include_superseded=False, corpus=Non
             "total_hits": sum(hit_counts.values()), "hit_counts": hit_counts,
             "ai_label": result.ai_label, "review_required": result.review_required,
             "exhausted_scope": list(result.exhausted_scope),
-            "export_enabled": result.export_enabled,
+            "export_enabled": result.export_enabled, "summary": result.summary,
         })
     except Exception:
         # §9 推进可靠性:失败不静默 + 落失败态(user 已落,仅补失败 assistant);best-effort(F6)

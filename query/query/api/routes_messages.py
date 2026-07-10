@@ -61,6 +61,7 @@ def ask(cid: str, body: AskBody, request: Request, svc: QueryService = Depends(g
     result.meta = {
         "elapsed_ms": elapsed_ms, "total_hits": sum(hit_counts.values()), "hit_counts": hit_counts,
     }
+    result.summary = svc.agent.summarize(result)  # API 富集层 TL;DR(默认抽取/模板;域/CLI 不填)
     result.meta["message_id"] = _persist(svc, cid, body.query, result, hit_counts, elapsed_ms)
     return result.to_dict()
 

@@ -251,6 +251,7 @@ class QueryResult:
     # ── SPEC-API 加法(默认时 to_dict 省略 → §10 byte 等价,CLI 输出不变)──
     structured: StructuredResult | None = None  # 四-Tab(API 层装配;CLI/域默认 None)
     meta: dict = field(default_factory=dict)     # {elapsed_ms, total_hits, hit_counts}(API 层填)
+    summary: str | None = None                   # 答复 TL;DR 综述(API 富集层填;CLI/域默认 None)
 
     def to_dict(self) -> dict:
         d = {
@@ -268,6 +269,8 @@ class QueryResult:
             d["structured"] = self.structured.to_dict()
         if self.meta:
             d["meta"] = dict(self.meta)
+        if self.summary is not None:  # API 富集层填;域/CLI 默认 None → 省略,byte 等价
+            d["summary"] = self.summary
         return d
 
     def to_json(self, *, indent: int | None = None) -> str:

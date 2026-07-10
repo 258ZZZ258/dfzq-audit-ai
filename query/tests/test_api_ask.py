@@ -49,6 +49,9 @@ class FakeAgent:
         self.last_history = history
         return self._result
 
+    def summarize(self, result):  # API 富集层接口(默认关 → None,不改契约)
+        return None
+
 
 def _make_result(route=RouteType.EVIDENCE):
     return QueryResult(
@@ -81,6 +84,16 @@ class FakeService:
 def _client(svc=None):
     svc = svc or FakeService()
     return TestClient(create_app(service=svc)), svc
+
+
+def test_summary_flows_into_response_when_set():
+    # API 富集层 summary 经 svc.agent.summarize → result.summary → to_dict["summary"]
+    svc = FakeService()
+    svc.agent.summarize = lambda result: "客户适当性需风险测评并留痕。"
+    svc.store.create("C1")
+    c, _ = _client(svc)
+    r = c.post(f"{_PREFIX}/conversations/C1/messages", json={"query": "适当性依据"})
+    assert r.status_code == 200 and r.json()["summary"] == "客户适当性需风险测评并留痕。"
 
 
 def test_ask_returns_structured_citations_meta_and_persists():

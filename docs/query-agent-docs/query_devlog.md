@@ -586,3 +586,24 @@ query 全量 **47 passed**(真栈 + 真 BGE-M3)/ 零网络默认(stub)/ ruff 全
 - **顺带核实(现状,非新决策)**:`query/` 已有前端向 HTTP/API 层(阶段 B-API `query/query/api/*`,PR #39 合并),但**尚无 v0.4 §8 的 biz↔ai 边界端点**(`/retrieve`、`/generate`);`understand/router.py` 是语义路由,非 web 路由;
   `route_type`(8 值)/`review_required`/`exhausted_scope` 均已在 `contract.py` 就位,边界可直接复用无需新增字段;Langfuse
   trace 现按内部 name 建、未接外部 `request_id`——biz 若要关联 trace,只需在边界调用时注入 `request_id`,不需 query 侧改动。
+
+## 2026-07-10 答复 TL;DR 综述(API 富集层,非路由)
+
+需求:给整段答复一个 1-2 句综述。**决策:落 API 富集层(`enrich/summary.py`),不加 graph 路由节点**——
+理由见评估:全局 summary 节点会把「引用 ID 注入 + 禁裸结论」的可核查性红线破掉(尤其 R6 统计数字 / R2 diff
+事实经 LLM 复述会错),且破坏结构块契约、重复 SPEC-API 早留的 `[query.enrich]` 缝。
+
+- **落点**:`QueryAgent.summarize(result)`(公开,API 层调)→ `enrich.summarize_answer(result, _summary_llm, cfg)`;
+  `_summary_llm = maybe_make_llm_client(summary_llm, ...)`(镜像 `_merge_llm`,off/stub→None)。**域/CLI 不调**
+  → `QueryResult.summary` 默认 None、`to_dict` 省略(byte 等价,同 `structured`/`meta` 加法模式)。
+- **分档(降幻觉)**:仅 **R1/R5**(散文生成型)允许 LLM 概括;**R2/R3/R4/R6/R7/R8 恒确定性**——首句/截断,或
+  纯表格/卡片路由用计数句(数字取自结果结构,不过 LLM)。R3 卡片守「零臆造」→ 计数,不 LLM。
+- **护栏**:LLM 只概括**已装配答复**(已锚 clause_id),prompt 禁新增制度名/文号/条款号/数字/结论;
+  fail-safe:LLM 抛/返空 → 回落抽取,绝不阻断响应。
+- **接线**:前端两路都填——同步 `routes_messages.ask` + 前端 SSE `sse.stream_ask`(done 帧带 `summary`)。
+  **Java 边界 `/v1/query` 不动**(边界契约主本在 biz 仓,加 summary 属跨仓契约变更,须先对齐)。
+- **配置**:`[query]` 加 `summary_llm`(默认 false)/`summary_model`/`summary_max_chars`;env `QUERY_SUMMARY_LLM`/
+  `QUERY_SUMMARY_MODEL`。**踩坑钉子**:`AnswerBlock` 字段是 `type` 不是 `block_type`(SSE wire 用 block_type,
+  dataclass 属性是 type)。测试 double(FakeAgent / SSE SimpleNamespace)须补 `summarize`,否则 SSE 吞成 error 帧。
+- **验证**:`test_summary_enrich`(12)+ API 接线/回归;真 `QueryAgent.summarize` 冒烟(抽取/计数/None 省略);
+  ruff 绿;全 query 419 收集 0 错。

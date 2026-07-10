@@ -73,6 +73,11 @@ class QueryAgent:
         self._merge_llm = maybe_make_llm_client(
             qcfg.merge_context, qcfg, model=qcfg.merge_model or qcfg.llm_model
         )
+        # TL;DR 综述客户端(API 富集层用):仅 summary_llm 开 + gateway + 有 key 时建;否则 None →
+        # 抽取式/模板兜底(零网络)。仅 R1/R5 用它(见 enrich.summary)。
+        self._summary_llm = maybe_make_llm_client(
+            qcfg.summary_llm, qcfg, model=qcfg.summary_model or qcfg.llm_model
+        )
         self._app = self._build()
 
     @classmethod
@@ -224,6 +229,16 @@ class QueryAgent:
                   "clarify", "refuse", "placeholder"):
             g.add_edge(n, END)
         return g.compile()
+
+    def summarize(self, result: QueryResult) -> str | None:
+        """答复 TL;DR 综述(**API 富集层**调用;域/CLI 不调 → ``result.summary`` 保持 None)。
+
+        仅 R1/R5 且 ``summary_llm`` 开+gateway 时走 LLM,否则确定性抽取/模板兜底(见
+        ``enrich.summary``);护栏:只概括已装配答复、不新增事实,失败回落抽取不阻断。
+        """
+        from query.enrich import summarize_answer
+
+        return summarize_answer(result, self._summary_llm, self._qcfg)
 
     def ask(
         self, query: str, history: list[dict] | None = None, *, trace_id: str | None = None
