@@ -78,6 +78,8 @@ rerank_model = "BAAI/bge-reranker-v2-m3"  # ⚠ bge 本地模型名/路径 或 a
 # env:QUERY_RERANK_BASE_URL / QUERY_RERANK_API_KEY / QUERY_RERANK_PATH
 rerank_endpoint_path = "/rerank"  # ⚠ base_url 后拼接路径
 # rerank_endpoint_top_n = 8       # ⚠ 请求 top_n(缺省不限,返回全部重排;缺项候选补回原序不丢)
+# rerank_min_score = 0.3          # ⚠ §8.1 匹配度下限:重排分 < 此值移出作答集,不足则覆盖拒答;
+                                  #   仅 rerank 开(bge/api)生效,none 无绝对分则 no-op;须实测标定。env QUERY_RERANK_MIN_SCORE
 llm_model = "gpt-5.4-nano"  # ⚠ gateway 时模型名;env OPENAI_MODEL 可覆盖
 # ── 答复 TL;DR 综述(API 富集层,非路由;env QUERY_SUMMARY_LLM / QUERY_SUMMARY_MODEL)──
 summary_llm = false         # 用 LLM 提炼整段答复摘要;默认关 → 抽取式/模板兜底(零网络)。仅 R1/R5 走 LLM

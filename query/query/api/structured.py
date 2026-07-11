@@ -30,6 +30,15 @@ _SUMMARY_LEN = 100   # 条款摘要截断长度(⚠-model 兜底,⚠ 可调)
 
 
 # ── 纯函数装配(无栈可测)────────────────────────────────────────────────────
+def _display_score(c) -> float:
+    """匹配度/排序**统一信号**:rerank 开 → 相关性绝对分 ``rerank_score``;否则 RRF 融合分 ``score``。
+
+    使「匹配度 % 显示」「Tab 排序」「§8.1 下限门」同源(rerank 开时不再显示 RRF/排序 rerank 错位)。
+    """
+    rs = getattr(c, "rerank_score", None)
+    return rs if rs is not None else c.score
+
+
 def assemble_structured(cands, case_cands, chunk_doc, case_rows) -> StructuredResult:
     """候选 + 预取 PG 数据 → 四-Tab。
 
@@ -39,8 +48,8 @@ def assemble_structured(cands, case_cands, chunk_doc, case_rows) -> StructuredRe
     """
     internal = [c for c in cands if c.corpus_type == _INT]
     external = [c for c in cands if c.corpus_type == _EXT]
-    norm = make_normalizer([c.score for c in cands])
-    norm_case = make_normalizer([c.score for c in case_cands])
+    norm = make_normalizer([_display_score(c) for c in cands])
+    norm_case = make_normalizer([_display_score(c) for c in case_cands])
     return StructuredResult(
         regulations=TabPayload(items=_regulations(internal, chunk_doc, norm)),
         clauses=TabPayload(items=_clauses(internal, chunk_doc, norm)),
@@ -51,16 +60,16 @@ def assemble_structured(cands, case_cands, chunk_doc, case_rows) -> StructuredRe
 
 
 def _clauses(cands, chunk_doc, norm) -> list[ClauseHit]:
-    """命中条款:逐候选一行(chunk 级),按分降序。"""
+    """命中条款:逐候选一行(chunk 级),**显式按显示分降序**(B:rerank 开时也严格递减)。"""
     out: list[ClauseHit] = []
-    for c in cands:
+    for c in sorted(cands, key=_display_score, reverse=True):
         chunk, dv = chunk_doc.get(c.chunk_id, (None, None))
         if chunk is None:
             continue
         out.append(ClauseHit(
             seq=len(out) + 1, clause_id=c.chunk_id,
             clause_title=_clause_title(chunk.clause_path), doc_title=_title(dv),
-            doc_id=chunk.doc_version_id, match_score=norm(c.score),
+            doc_id=chunk.doc_version_id, match_score=norm(_display_score(c)),
             clause_path=chunk.clause_path, summary=_truncate(chunk.text, _SUMMARY_LEN),
             # theme(⚠-data):无 clause_tags 回查 → None(省略);后续迭代接打标
         ))
@@ -73,7 +82,7 @@ def _regulations(cands, chunk_doc, norm) -> list[RegulationHit]:
     for seq, (c, chunk, dv) in enumerate(_dedup_by_doc(cands, chunk_doc), 1):
         out.append(RegulationHit(
             seq=seq, doc_id=chunk.doc_version_id, doc_version_id=chunk.doc_version_id,
-            title=_title(dv), match_score=norm(c.score),
+            title=_title(dv), match_score=norm(_display_score(c)),
             clause_excerpt=_truncate(chunk.text, _EXCERPT_LEN),
             doc_no=_attr(dv, "doc_number"), publish_date=_iso(_attr(dv, "issue_date")),
             effective_date=_iso(_attr(dv, "effective_date")), issuing_dept=_attr(dv, "issuer"),
@@ -107,10 +116,10 @@ def _cases(cands, case_rows, norm) -> list[CaseHit]:
         if not dvid:
             continue
         cur = best.get(dvid)
-        if cur is None or c.score > cur.score:
+        if cur is None or _display_score(c) > _display_score(cur):
             best[dvid] = c
     out: list[CaseHit] = []
-    ranked = sorted(best.items(), key=lambda kv: kv[1].score, reverse=True)
+    ranked = sorted(best.items(), key=lambda kv: _display_score(kv[1]), reverse=True)
     for seq, (dvid, _c) in enumerate(ranked, 1):
         case, dv = case_rows.get(dvid, (None, None))
         out.append(CaseHit(
@@ -174,9 +183,9 @@ def _dedup_by_doc(cands, chunk_doc):
             continue
         dvid = chunk.doc_version_id
         cur = best.get(dvid)
-        if cur is None or c.score > cur[0].score:
+        if cur is None or _display_score(c) > _display_score(cur[0]):
             best[dvid] = (c, chunk, dv)
-    return sorted(best.values(), key=lambda t: t[0].score, reverse=True)
+    return sorted(best.values(), key=lambda t: _display_score(t[0]), reverse=True)
 
 
 def make_normalizer(scores):

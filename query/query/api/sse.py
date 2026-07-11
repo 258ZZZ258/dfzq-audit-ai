@@ -105,23 +105,25 @@ def _evidence_stream(svc, query, include_superseded, corpus):
     from query.graph import resolve_scope
     from query.refuse.coverage_refusal import refuse_coverage
     from query.retrieve.hybrid import drop_degraded
-    from query.retrieve.sufficiency import assess
+    from query.retrieve.sufficiency import above_min_score, assess
     from query.understand.classify import SceneType, classify
 
     cands = _filter_corpus(
         drop_degraded(svc.retriever.retrieve(query, include_superseded=include_superseded)), corpus,
     )
+    # 匹配度下限(设计 A,与同步一致):过阈值入作答集;closest 仍取全量候选(含被剔的)
+    answer_cands = above_min_score(cands, svc.qcfg.rerank_min_score)
     scene = classify(query)
     scope = resolve_scope(scene.matters)
     # 充分性闸(与同步一致):不足 → 覆盖拒答(附最接近 N 条),绝不流出无覆盖答复
-    if not assess(cands, scene.matters, min_hits=svc.qcfg.sufficiency_min_hits).sufficient:
+    if not assess(answer_cands, scene.matters, min_hits=svc.qcfg.sufficiency_min_hits).sufficient:
         closest = list(fetch_anchors(svc.pg, [c.chunk_id for c in cands][:_CLOSEST_N]).values())
         yield ("result", refuse_coverage(scope, closest))
         return
     # 充分 → 真流式;delta 照流,终态 result 捕获后再附挂案例
     result = None
     for kind, payload in generate_evidence_stream(
-        query, cands, svc.pg, svc.llm, exhausted_scope=scope
+        query, answer_cands, svc.pg, svc.llm, exhausted_scope=scope
     ):
         if kind == "delta":
             yield ("delta", payload)

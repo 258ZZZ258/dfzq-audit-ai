@@ -196,7 +196,7 @@ def test_evidence_stream_sufficiency_gate_refuses(monkeypatch):
     svc = SimpleNamespace(
         retriever=SimpleNamespace(retrieve=lambda q, include_superseded=False: []),
         pg=None, llm=None,
-        qcfg=SimpleNamespace(sufficiency_min_hits=2, attach_cases=True),
+        qcfg=SimpleNamespace(sufficiency_min_hits=2, attach_cases=True, rerank_min_score=None),
     )
     events = list(_evidence_stream(svc, "费用报销规定", False, None))
     assert [k for k, _ in events] == ["result"]        # 无 delta,直接拒答

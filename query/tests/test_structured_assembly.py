@@ -131,3 +131,28 @@ def test_empty_inputs_all_tabs_zero():
     s = assemble_structured([], [], {}, {}).to_dict()
     for tab in ("regulations", "clauses", "regulatory_rules", "cases"):
         assert s[tab] == {"total": 0, "items": []}
+
+
+def _rc(cid, rrf, rerank, dvid):
+    """带 rerank_score 的候选(rerank 开)。"""
+    return Candidate(cid, rrf, "P-INT", dvid, None, None, False, "hybrid", rerank_score=rerank)
+
+
+def test_clauses_ordered_and_scored_by_rerank_when_present():
+    # rerank 开:rerank_score 序与 RRF 相反 → clauses 按 rerank 降序,match_score 亦基于 rerank
+    cands = [_rc("a", 9.0, 0.1, "DV1"), _rc("b", 1.0, 0.9, "DV2")]  # RRF: a>b;rerank: b>a
+    chunk_doc = {"a": (_chunk("DV1", "1/1", "ta"), _dv("A")),
+                 "b": (_chunk("DV2", "1/1", "tb"), _dv("B"))}
+    res = assemble_structured(cands, [], chunk_doc, {})
+    assert [h.clause_id for h in res.clauses.items] == ["b", "a"]  # 按 rerank 降序(非 RRF)
+    scores = {h.clause_id: h.match_score for h in res.clauses.items}
+    assert scores["b"] == 1.0 and scores["a"] == 0.0  # 匹配度归一基于 rerank 分
+
+
+def test_clauses_fallback_to_rrf_when_rerank_off():
+    # rerank 关:无 rerank_score → 显示分回落 RRF;顺序/匹配度按 RRF
+    cands = [_cand("a", 1.0, "P-INT", "DV1"), _cand("b", 9.0, "P-INT", "DV2")]
+    chunk_doc = {"a": (_chunk("DV1", "1/1", "ta"), _dv("A")),
+                 "b": (_chunk("DV2", "1/1", "tb"), _dv("B"))}
+    res = assemble_structured(cands, [], chunk_doc, {})
+    assert [h.clause_id for h in res.clauses.items] == ["b", "a"]  # RRF b>a

@@ -16,9 +16,15 @@ import httpx
 
 @runtime_checkable
 class RerankerClient(Protocol):
-    """重排接口:``rerank(query, candidates) -> 重排后 candidates``(候选需带 ``.text``)。"""
+    """重排接口:``rerank(query, candidates) -> 重排后 candidates``(候选需带 ``.text``)。
+
+    ``rerank_scored`` 附**相关性绝对分** → ``[(cand, score|None)]``(重排序;
+    ``none`` 无打分器→全 None)。候选鸭子类型(不引 ``Candidate``);分数写回由 ``Retriever`` 负责。
+    """
 
     def rerank(self, query: str, candidates: list) -> list: ...
+
+    def rerank_scored(self, query: str, candidates: list) -> list: ...
 
 
 class NoneReranker:
@@ -26,6 +32,9 @@ class NoneReranker:
 
     def rerank(self, query: str, candidates: list) -> list:
         return candidates
+
+    def rerank_scored(self, query: str, candidates: list) -> list:
+        return [(c, None) for c in candidates]  # 无打分器 → 无绝对分
 
 
 class BGEReranker:
@@ -67,11 +76,14 @@ class BGEReranker:
             return mdl(**inp).logits.view(-1).tolist()
 
     def rerank(self, query: str, candidates: list) -> list:
+        return [c for c, _ in self.rerank_scored(query, candidates)]
+
+    def rerank_scored(self, query: str, candidates: list) -> list:
         if not candidates:
-            return candidates
+            return []
         scores = self._scores(query, [getattr(c, "text", None) or "" for c in candidates])
         order = sorted(zip(scores, candidates, strict=True), key=lambda z: z[0], reverse=True)
-        return [c for _, c in order]
+        return [(c, float(s)) for s, c in order]
 
 
 class APIReranker:
@@ -120,21 +132,24 @@ class APIReranker:
         return pairs
 
     def rerank(self, query: str, candidates: list) -> list:
+        return [c for c, _ in self.rerank_scored(query, candidates)]
+
+    def rerank_scored(self, query: str, candidates: list) -> list:
         if not candidates:
-            return candidates
+            return []
         docs = [getattr(c, "text", None) or "" for c in candidates]
         pairs = self._rank(query, docs)
-        if not pairs:  # 空结果 → 保原序,不静默丢候选
-            return candidates
+        if not pairs:  # 空结果 → 保原序,不静默丢候选(无分)
+            return [(c, None) for c in candidates]
         seen: set[int] = set()
-        ordered = []
-        for i, _ in pairs:
+        ordered: list = []
+        for i, s in pairs:
             if 0 <= i < len(candidates) and i not in seen:
-                ordered.append(candidates[i])
+                ordered.append((candidates[i], s))
                 seen.add(i)
-        for i, c in enumerate(candidates):  # top_n 截断时未返回的候选补回原序
+        for i, c in enumerate(candidates):  # top_n 截断时未返回的候选补回原序(无分 → None)
             if i not in seen:
-                ordered.append(c)
+                ordered.append((c, None))
         return ordered
 
 

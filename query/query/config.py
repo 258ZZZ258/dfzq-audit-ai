@@ -44,6 +44,9 @@ class QueryConfig(BaseModel):
     rerank_endpoint_path: str = "/rerank"  # ⚠ base_url 后拼接路径
     # ⚠ 请求 top_n(None=不限,返回全部重排;缺项候选补回原序不丢)
     rerank_endpoint_top_n: int | None = None
+    # ⚠ §8.1 匹配度下限(设计 A):重排相关性绝对分 < 此值的候选移出作答集,不足 min_hits → 覆盖拒答。
+    # None=关(默认)。**仅 rerank 开(bge/api)时生效**——none 无绝对分则 no-op。值须实测标定(§13 V0)。
+    rerank_min_score: float | None = None  # env QUERY_RERANK_MIN_SCORE
     llm_model: str = "gpt-5.4-nano"  # ⚠ gateway 时主答模型名;env OPENAI_MODEL 可覆盖
     # ⚠ §9.2 忠实性复核模型(Kimi),与主答 llm_model 分离(§9.1);默认 kimi-2.5 为意图占位,
     # 真名待甲方网关注册表;env QUERY_REVIEW_MODEL(query 专属)/ OPENAI_REVIEW_MODEL 覆盖。
@@ -136,6 +139,8 @@ def _apply_env(raw: dict) -> None:
         raw["summary_llm"] = env["QUERY_SUMMARY_LLM"]  # "0"/"1" → pydantic bool 强转
     if "QUERY_SUMMARY_MODEL" in env:
         raw["summary_model"] = env["QUERY_SUMMARY_MODEL"]
+    if "QUERY_RERANK_MIN_SCORE" in env:
+        raw["rerank_min_score"] = env["QUERY_RERANK_MIN_SCORE"]  # → pydantic float 强转
 
 
 def load_query_config(config_dir: str | os.PathLike | None = None) -> QueryConfig:

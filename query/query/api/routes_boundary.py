@@ -22,7 +22,7 @@ from query.api.auth import require_internal_token
 from query.api.errors import validation_error
 from query.api.service import QueryService, get_service
 from query.api.sse import KEEPALIVE, format_sse
-from query.api.structured import make_normalizer
+from query.api.structured import _display_score, make_normalizer
 from query.contract import RouteType
 from query.listing.r4_listing import array_any_expr
 
@@ -143,8 +143,9 @@ def _score_map(candidates: list) -> dict[str, float]:
     """
     by_id: dict[str, float] = {}
     for c in candidates:
+        s = _display_score(c)  # 与前端 structured 同口径:rerank 开→相关性分,否则 RRF
         prev = by_id.get(c.chunk_id)
-        if prev is None or c.score > prev:
-            by_id[c.chunk_id] = c.score
+        if prev is None or s > prev:
+            by_id[c.chunk_id] = s
     norm = make_normalizer(list(by_id.values()))
     return {cid: norm(s) for cid, s in by_id.items()}

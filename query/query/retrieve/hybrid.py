@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextvars
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pipeline.config import load_config
 from pipeline.index.embedding_client import EmbeddingClient
@@ -119,6 +119,7 @@ class Candidate:
     degraded: bool
     retrieval_mode: str  # hybrid | dense_only(命中所在分区的检索模式)
     text: str | None = None  # §5.5 Milvus 截断 text(仅 with_text 检索-重排一跳填;默认 None)
+    rerank_score: float | None = None  # 重排器相关性绝对分(仅 rerank 开时填;RRF 融合分见 score)
 
 
 def _to_candidate(hit: dict, mode: str) -> Candidate:
@@ -225,7 +226,12 @@ class Retriever:
                 if prev is None or cand.score > prev.score:
                     merged[cid] = cand
         ranked = sorted(merged.values(), key=lambda c: c.score, reverse=True)  # RRF 序(none 终态)
-        ranked = self._reranker.rerank(query, ranked)  # bge 重排对**原问**;none passthrough(等价)
+        # 重排对**原问**(none passthrough,byte 等价);写回相关性绝对分 rerank_score(none→None),
+        # 供 §8.1 匹配度下限过滤(设计 A;rerank 关无绝对分 → no-op,见 sufficiency.above_min_score)
+        ranked = [
+            replace(c, rerank_score=s) if s is not None else c
+            for c, s in self._reranker.rerank_scored(query, ranked)
+        ]
         out = ranked[: (scope.topk if scope and scope.topk else self._qcfg.topk)]
         _collect(scope, out)
         return out

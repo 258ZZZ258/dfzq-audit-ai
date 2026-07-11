@@ -607,3 +607,31 @@ query 全量 **47 passed**(真栈 + 真 BGE-M3)/ 零网络默认(stub)/ ruff 全
   dataclass 属性是 type)。测试 double(FakeAgent / SSE SimpleNamespace)须补 `summarize`,否则 SSE 吞成 error 帧。
 - **验证**:`test_summary_enrich`(12)+ API 接线/回归;真 `QueryAgent.summarize` 冒烟(抽取/计数/None 省略);
   ruff 绿;全 query 419 收集 0 错。
+
+## 2026-07-10 §8.1 匹配度下限门(设计 A:弱匹配→覆盖拒答)
+
+需求:给返回内容设匹配度最低阈值。评估结论(见对话):**只能卡在重排相关性绝对分**——RRF 融合分是
+排名派生无绝对含义、min-max 展示分是批内相对、Milvus 无 score_threshold;且**必须喂给覆盖拒答**(设计 A),
+不静默丢。**默认关**。
+
+- **关键坑**:reranker(bge/api)**只重排序、relevance_score 算完就丢**,候选只有 RRF `.score`,下游无绝对分可卡。
+  且 reranker 刻意 Candidate-agnostic(鸭子类型 `.text`,测试用 SimpleNamespace)→ **不能在 reranker 内 `replace`**。
+- **落点**:reranker 加 `rerank_scored()` 返 `[(cand, score|None)]`(不 mutate、保鸭子类型);由知晓 `Candidate`
+  的 `Retriever.retrieve` 用 `dataclasses.replace` 写回 `Candidate.rerank_score`(add-only 字段,默认 None)。
+- **门**:`sufficiency.above_min_score(cands, min_score)`——保留 `rerank_score >= 阈值` 者作**作答集**;
+  `min_score=None`(默认关)或 **rerank 关(候选全无绝对分)→ no-op**(不误杀无 dense 分的 sparse 精确命中)。
+  接入 `graph._evidence` + `sse._evidence_stream`(R1 同步+流式一致):作答集喂 sufficiency+生成,不足 min_hits →
+  **覆盖拒答**,`closest` 仍从**全量候选**取最接近 N 条(含被剔的)供人工核实。
+- **配置**:`[query] rerank_min_score`(默认 None)+ env `QUERY_RERANK_MIN_SCORE`。**仅 rerank 开(bge/api)生效**,
+  值须实测标定(§13 V0)。**已知范围**:仅 R1 接(同步+SSE);**R5 判定 / R3 案例自有检索链,本轮未接**(follow-up)。
+- **验证**:`test_min_score_gate`(9)+ reranker `rerank_scored` 回归 + retrieve 写回分;默认 None → byte 等价;
+  ruff 绿;全 query 427 收集 0 错。
+
+### 续:匹配度显示/排序对齐 rerank 分(A+B,消三分打架)
+
+发现返回结果排序的不一致:原来「匹配度 % 显示」用 RRF 融合分归一、clauses Tab 却按候选(rerank)序不显式排、
+门用 rerank 分——**三种分打架**,rerank 开时命中条款 % 不单调。修:`structured._display_score(c)`=rerank 开
+→`rerank_score`、否则 RRF `score`,**贯穿归一 + 各 Tab 排序 + clauses 显式降序**;边界 `_score_map` 同改
+(守 BOUNDARY「citation.score 与前端 structured 同口径」不变量——同字段同 0–1 range,非契约形状变更)。
+现「显示 / 排序 / 下限门」全同源;rerank 关时全回落 RRF、byte 等价。回归测:clauses 按 rerank 降序 +
+match_score 基于 rerank / rerank 关回落 RRF 两例。全 query 429 收集 0 错,ruff 绿。

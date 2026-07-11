@@ -123,9 +123,14 @@ def test_retriever_rerank_none_preserves_rrf_order():
 def test_retriever_uses_injected_reranker():
     # rerank=bge:with_text=True + 注入 reranker(反转 RRF 序)→ 终态被重排
     captured: dict = {}
-    rev = SimpleNamespace(rerank=lambda q, cands: list(reversed(cands)))
+    # retrieve 用 rerank_scored(反转序 + 附分),retrieve 据分写回 rerank_score
+    rev = SimpleNamespace(
+        rerank=lambda q, cands: list(reversed(cands)),
+        rerank_scored=lambda q, cands: [(c, 0.5) for c in reversed(cands)],
+    )
     r = Retriever(_FAKE_EMBED, _fake_milvus(captured), QueryConfig(rerank_backend="bge"),
                   reranker=rev)
     out = r.retrieve("q")
     assert captured["with_text"] is True
     assert [c.chunk_id for c in out] == ["lo", "hi"]  # RRF [hi,lo] 经反转重排 → [lo,hi]
+    assert all(c.rerank_score == 0.5 for c in out)  # 分数写回候选(供匹配度下限)

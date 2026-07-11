@@ -15,7 +15,7 @@ from query.generate.r1_evidence import generate_evidence
 from query.llm import LLMClient, maybe_make_llm_client
 from query.observe import make_tracer
 from query.refuse.coverage_refusal import refuse_coverage, refuse_out_of_domain
-from query.retrieve.sufficiency import assess
+from query.retrieve.sufficiency import above_min_score, assess
 from query.state import QueryState
 from query.understand.classify import SceneType, classify
 from query.understand.merge import merge_context
@@ -126,11 +126,15 @@ class QueryAgent:
 
         # 契约:degraded 块仅全文检索、不参与条款级引用 → R1 充分性与生成只用非降级候选
         cands = drop_degraded(self._retriever.retrieve(state.query))
+        # 匹配度下限(设计 A):过阈值者入作答集;不足 min_hits → 覆盖拒答,closest 取全量候选(含被剔的)
+        answer_cands = above_min_score(cands, self._qcfg.rerank_min_score)
         matters = (state.scene or {}).get("matters", [])
         scope = resolve_scope(matters)  # exhausted_scope 必非空(可解释拒答)
-        suff = assess(cands, matters, min_hits=self._qcfg.sufficiency_min_hits)
+        suff = assess(answer_cands, matters, min_hits=self._qcfg.sufficiency_min_hits)
         if suff.sufficient:
-            res = generate_evidence(state.query, cands, self._pg, self._llm, exhausted_scope=scope)
+            res = generate_evidence(
+                state.query, answer_cands, self._pg, self._llm, exhausted_scope=scope
+            )
         else:
             closest = list(fetch_anchors(self._pg, [c.chunk_id for c in cands][:3]).values())
             res = refuse_coverage(scope, closest)

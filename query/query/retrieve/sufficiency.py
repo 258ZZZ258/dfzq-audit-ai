@@ -22,3 +22,18 @@ def assess(candidates: Sequence, matters: Sequence[str], *, min_hits: int = 1) -
         sufficient=len(candidates) >= max(1, min_hits),
         exhausted_scope=list(dict.fromkeys(matters)),
     )
+
+
+def above_min_score(candidates: Sequence, min_score: float | None) -> list:
+    """匹配度下限过滤(设计 A):保留重排相关性绝对分 ≥ ``min_score`` 的候选,喂充分性/生成。
+
+    ``min_score=None`` → no-op(默认关)。**rerank 关时无候选带 ``rerank_score``**(全 None)→ 亦 no-op
+    (不误杀,尤其无 dense 分的 sparse 精确命中)。过阈值后不足 ``min_hits`` 由调用方触发覆盖拒答;
+    被剔候选仍由调用方从全量候选取「最接近 N 条」供人工核实(不静默丢)。
+    """
+    if min_score is None:
+        return list(candidates)
+    scored = [c for c in candidates if getattr(c, "rerank_score", None) is not None]
+    if not scored:  # rerank 关(无绝对分)→ 阈值 no-op
+        return list(candidates)
+    return [c for c in scored if c.rerank_score >= min_score]
