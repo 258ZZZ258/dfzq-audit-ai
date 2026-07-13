@@ -12,6 +12,8 @@ from common.manifest import REQUIRED_COLUMNS
 from pipeline.preseg.reader import (
     PRESEG_REQUIRED_COLUMNS,
     PresegFormatError,
+    blocks_content_hash,
+    parse_blocks,
     read_blocks,
     read_cases,
     validate_manifest_header,
@@ -132,6 +134,52 @@ class TestBlocks:
         with pytest.raises(PresegFormatError, match="block_seq"):
             read_blocks(p)
 
+    # ── CP-010 内网对齐新增字段(source_code / clause_path_norm / is_catalog)──
+
+    def test_new_fields_parse(self, tmp_path):
+        p = tmp_path / "n.jsonl"
+        p.write_text(
+            '{"block_seq": 0, "clause_label": "第一章", "text": "总则", "is_catalog": true}\n'
+            '{"block_seq": 1, "clause_label": "第二十一条", "text": "……", '
+            '"source_code": "LC-021", "clause_path_norm": "2/21"}\n',
+            encoding="utf-8",
+        )
+        blocks = read_blocks(p)
+        assert blocks[0].is_catalog is True
+        assert blocks[1].source_code == "LC-021"
+        assert blocks[1].clause_path_norm == "2/21"
+        assert blocks[1].is_catalog is False  # 缺省 False
+
+    def test_non_bool_is_catalog_rejected(self, tmp_path):
+        # 同 is_table:字符串 "true" 不得被 bool() 强转 → 拒收
+        p = tmp_path / "ic.jsonl"
+        p.write_text('{"block_seq": 0, "text": "a", "is_catalog": "true"}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="is_catalog"):
+            read_blocks(p)
+
+    def test_non_str_source_code_rejected(self, tmp_path):
+        p = tmp_path / "sc.jsonl"
+        p.write_text('{"block_seq": 0, "text": "a", "source_code": 123}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="source_code"):
+            read_blocks(p)
+
+    def test_non_str_clause_path_norm_rejected(self, tmp_path):
+        p = tmp_path / "cpn.jsonl"
+        p.write_text('{"block_seq": 0, "text": "a", "clause_path_norm": 21}\n', encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="clause_path_norm"):
+            read_blocks(p)
+
+    def test_content_hash_includes_new_structural_fields(self):
+        # clause_path_norm 进 chunk_id、source_code 决定桥接、is_catalog 决定成不成块 → 必须进指纹,
+        # 否则"仅改结构元数据"的变化件被误判 DUPLICATE 漏更新
+        base = parse_blocks('{"block_seq": 0, "text": "a", "clause_path_norm": "2/21"}', "b")
+        same = parse_blocks(
+            '{"text": "a", "block_seq": 0, "clause_path_norm": "2/21"}', "b"
+        )  # 仅键序重排
+        changed = parse_blocks('{"block_seq": 0, "text": "a", "clause_path_norm": "2/22"}', "b")
+        assert blocks_content_hash(base) == blocks_content_hash(same)  # 重格式化不变
+        assert blocks_content_hash(base) != blocks_content_hash(changed)  # 路径变→指纹变
+
 
 # ── cases JSONL ──────────────────────────────────────────────
 
@@ -230,4 +278,25 @@ class TestCases:
         p = tmp_path / "bad_enc.jsonl"
         p.write_bytes(b'{"case_name": "\xff\xfe"}\n')
         with pytest.raises(PresegFormatError, match="UTF-8"):
+            read_cases(p)
+
+    # ── CP-010 精确桥接锚(law_code / law_content_code)──
+
+    def test_violated_reg_exact_anchors_parse(self, tmp_path):
+        rec = {"case_name": "A", "violated_regulations": [
+            {"title": "《X办法》", "clause_label": "第二十一条",
+             "law_code": "L-001", "law_content_code": "LC-021"}]}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        v = read_cases(p)[0].violated_regulations[0]
+        assert v.law_code == "L-001"
+        assert v.law_content_code == "LC-021"
+
+    def test_non_str_law_content_code_rejected(self, tmp_path):
+        # law_content_code 非 str → 桥接精确查会用错类型键 → 拒收
+        rec = {"case_name": "A", "violated_regulations": [
+            {"title": "《X》", "law_content_code": 21}]}
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(PresegFormatError, match="law_content_code"):
             read_cases(p)
