@@ -1,13 +1,14 @@
 """达梦源库 → 预切块批次目录导出入口(``python -m pipeline.preseg_export <out_dir>``)。
 
-甲方内网法规制度平台(达梦 DM8,8 表)→ 批次目录(SPEC-PRESEG §3 接收契约),之后由
+甲方内网法规制度平台(达梦 DM8)→ 批次目录(SPEC-PRESEG §3 接收契约),之后由
 ``python -m pipeline.preseg_ingest <out_dir>`` 灌库。两步分离:导出可离线核对产物,灌库需 PG/模型栈。
 
-**连接**:达梦 DSN 走环境变量 ``PRESEG_SOURCE_DSN``(如 ``dm+dmPython://user:pwd@host:5236``;
-驱动 ``dmPython`` + SQLAlchemy ``dm`` 方言,信创内网离线装)。不硬编码凭证/方言,适配部署实际。
+**连接**:达梦 DSN **仅**走环境变量 ``PRESEG_SOURCE_DSN``(如 ``dm+dmPython://user:pwd@host:5236``;
+驱动 ``dmPython`` + SQLAlchemy ``dm`` 方言,信创内网离线装)。不提供 ``--dsn`` CLI 入参——命令行参数
+会落进 shell history / 进程列表 / 作业日志,泄露生产凭证(Codex)。
 
-**为何 ``python -m``**:同 preseg_ingest——生产构建剔除 console_scripts,``python -m`` 不受影响,
-给运维稳定入口。转换纯逻辑在 ``pipeline.preseg.export``(FakeSource 单测);本模块只做连接 + 编排。
+**一致性快照**:整批导出在**单连接单事务**内读全部 8 表(Codex:每查询新开连接会让主表/子表来自不同
+时点,生成内部不一致却哈希自洽的"权威快照")。理想隔离级 REPEATABLE READ,按驱动能力尽力设置。
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from pathlib import Path
 
 from pipeline.preseg.export import Source, build_batch
 
-# ── 达梦 8 表读取(部署期真库联调;列集对齐知识库结构.md)────────────────────────
+# ── 达梦 8 表读取(部署期真库联调;列集/列宽对齐 东方/东方知识库/图片 真 schema)──────
+# DEL_FLAG 可空:SQL 用 (IS NULL OR <> 'D'),否则 NULL <> 'D' = UNKNOWN 会在库端静默漏行(Codex)。
+_ALIVE = "(DEL_FLAG IS NULL OR DEL_FLAG <> 'D')"
 
 _LAW_COLS = (
-    "CODE, NAME, DOC_NO, ISSUE_AUTH_CN, ISSUE_DATE, EFFECT_DATE, INVALID_DATE, "
-    "STATUS_CODE, SOURCE_LAW_ID, LEVELS, TAG, DEL_FLAG"
+    "CODE, NAME, DOC_NO, SCOPE, ISSUE_AUTH_CN, SUIT_OBJ_CODE, ISSUE_DATE, EFFECT_DATE, "
+    "INVALID_DATE, STATUS_CODE, SOURCE_LAW_ID, LEVELS, TAG, CREATOR_ID, DEL_FLAG"
 )
 _CONTENT_COLS = "CODE, LAW_CODE, PATH_CODE, IS_CATALOG, TITLE, INDEX_NO, CONTENT, DEL_FLAG"
 _CASE_COLS = (
@@ -42,56 +45,67 @@ _PUNISH_COLS = (
 
 
 class DmSource(Source):
-    """达梦源实现:SQLAlchemy 只读查 8 表,行 → dict(大写列名键)。表间为应用层 CODE 关联
-    (源库无物理外键,知识库结构.md §3),故子表按父级 CODE 显式过滤。"""
+    """达梦源实现:在**单连接**上只读查 8 表(一致性快照),行 → dict(大写列名键)。
+    表间为应用层 CODE 关联(源库无物理外键),子表按父级 CODE 显式过滤。"""
 
-    def __init__(self, engine) -> None:
-        self._engine = engine
+    def __init__(self, conn) -> None:
+        self._conn = conn
 
     def _rows(self, sql: str, **params: object) -> list[dict]:
         from sqlalchemy import text
 
-        with self._engine.connect() as c:
-            return [dict(r._mapping) for r in c.execute(text(sql), params)]
+        return [dict(r._mapping) for r in self._conn.execute(text(sql), params)]
 
     def iter_laws(self) -> list[dict]:
-        return self._rows(f"SELECT {_LAW_COLS} FROM ZNFG_IAM_LAW_BASIC WHERE DEL_FLAG <> 'D'")
+        return self._rows(f"SELECT {_LAW_COLS} FROM ZNFG_IAM_LAW_BASIC WHERE {_ALIVE}")
 
     def contents_for(self, law_code: str) -> list[dict]:
         return self._rows(
-            f"SELECT {_CONTENT_COLS} FROM ZNFG_IAM_LAW_CONTENT "
-            "WHERE LAW_CODE = :c AND DEL_FLAG <> 'D'",
+            f"SELECT {_CONTENT_COLS} FROM ZNFG_IAM_LAW_CONTENT WHERE LAW_CODE = :c AND {_ALIVE}",
             c=law_code,
         )
 
     def iter_cases(self) -> list[dict]:
-        return self._rows(f"SELECT {_CASE_COLS} FROM ZNFG_IAM_LAW_CASE_BASIC WHERE DEL_FLAG <> 'D'")
+        return self._rows(f"SELECT {_CASE_COLS} FROM ZNFG_IAM_LAW_CASE_BASIC WHERE {_ALIVE}")
 
     def parties_for(self, case_code: str) -> list[dict]:
         return self._rows(
-            f"SELECT {_PARTY_COLS} FROM ZNFG_IAM_LAW_CASE_PARTY "
-            "WHERE CASE_CODE = :c AND DEL_FLAG <> 'D'",
+            f"SELECT {_PARTY_COLS} FROM ZNFG_IAM_LAW_CASE_PARTY WHERE CASE_CODE = :c AND {_ALIVE}",
             c=case_code,
         )
 
     def punishes_for(self, case_code: str) -> list[dict]:
         return self._rows(
             f"SELECT {_PUNISH_COLS} FROM ZNFG_IAM_LAW_CASE_PUNISH "
-            "WHERE CASE_CODE = :c AND DEL_FLAG <> 'D'",
+            f"WHERE CASE_CODE = :c AND {_ALIVE}",
             c=case_code,
         )
 
 
-def run(out_dir: Path, dsn: str | None = None) -> int:
-    dsn = dsn or os.environ.get("PRESEG_SOURCE_DSN")
+def run(out_dir: Path) -> int:
+    dsn = os.environ.get("PRESEG_SOURCE_DSN")
     if not dsn:
-        print("✗ 未提供达梦 DSN(--dsn 或 env PRESEG_SOURCE_DSN)")
+        print("✗ 未设置 env PRESEG_SOURCE_DSN(达梦 DSN);出于凭证安全不支持命令行传入")
         return 2
     from sqlalchemy import create_engine
 
     engine = create_engine(dsn)
-    stats = build_batch(DmSource(engine), out_dir)
+    # 单连接单事务 = 一致性快照;尽力设 REPEATABLE READ(驱动不支持则回落默认,记部署注意)
+    conn = engine.connect()
+    try:
+        try:
+            conn = conn.execution_options(isolation_level="REPEATABLE READ")
+        except Exception:  # noqa: BLE001 - 方言不支持则回落,不阻断导出
+            print("⚠ 驱动不支持显式 REPEATABLE READ,回落默认隔离(部署期核实快照一致性)")
+        with conn.begin():
+            stats = build_batch(DmSource(conn), out_dir)
+    finally:
+        conn.close()
     print(f"✓ 导出批次 → {stats['out_dir']}:laws={stats['laws']} cases={stats['cases']}")
+    for w in stats.get("warnings", []):
+        print(f"  ⚠ {w}")
+    for s in stats.get("skipped", []):
+        print(f"  ⨯ 拒收/跳过:{s}")
     print(f"  下一步:python -m pipeline.preseg_ingest {stats['out_dir']}")
     return 0
 
@@ -99,14 +113,13 @@ def run(out_dir: Path, dsn: str | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m pipeline.preseg_export",
-        description="达梦源库 8 表 → 预切块批次目录(SPEC-PRESEG §3 接收契约)。",
+        description="达梦源库 8 表 → 预切块批次目录(DSN 走 env PRESEG_SOURCE_DSN)。",
     )
     ap.add_argument(
         "out_dir", type=Path, help="批次输出目录(生成 manifest.xlsx + blocks/ + cases.jsonl)"
     )
-    ap.add_argument("--dsn", default=None, help="达梦 DSN(默认取 env PRESEG_SOURCE_DSN)")
     args = ap.parse_args(argv)
-    return run(args.out_dir, args.dsn)
+    return run(args.out_dir)
 
 
 if __name__ == "__main__":

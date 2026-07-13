@@ -26,6 +26,7 @@ from ulid import ULID
 from common.pg_models import DocVersion
 from pipeline.cli import _drive_batch, _drive_context, _print_status
 from pipeline.config import load_config
+from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
 from pipeline.stages.s0_register import register_preseg_batch
 
 
@@ -51,6 +52,10 @@ def run(
         print(f"  ⚠ {w}")
     steps = _drive_batch(pg, ctx, bid)
     print(f"→ worker 推进 {steps} 步")
+    # 批后对账:法规可能晚于案例建块 → 重解析 anchored 未解析引用(顺序竞态自愈,Codex F7)
+    fixed = reconcile_preseg_case_refs(ctx, bid)
+    if fixed:
+        print(f"→ 案例引用对账修正 {fixed} 例")
     with pg.session() as s:
         docs = list(s.scalars(select(DocVersion).where(DocVersion.batch_id == bid)))
     _print_status(docs)

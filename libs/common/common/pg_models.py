@@ -105,7 +105,8 @@ class DocVersion(AuditMixin, Base):
     last_error_code: Mapped[str | None] = mapped_column(String(16))
 
     # ── P-PRESEG 预切块源通道(CP-010,迁移 0013,add-only;SPEC-PRESEG §5)──
-    source_doc_id: Mapped[str | None] = mapped_column(String(64), index=True)  # 源系统主键(幂等键)
+    # 源主键 CODE(幂等键;迁移 0013→0016 拓宽 64→256)
+    source_doc_id: Mapped[str | None] = mapped_column(String(256), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64))  # 源内容哈希(幂等键第二分量)
     # 效力状态权威留痕(D3 按通道分权威):chain(版本链推导,现状默认)| source(源系统直给)
     version_status_source: Mapped[str | None] = mapped_column(String(16))
@@ -115,8 +116,8 @@ class DocVersion(AuditMixin, Base):
     tags: Mapped[list | None] = mapped_column(JSONB)  # 源标签
     file_no: Mapped[str | None] = mapped_column(String(128))  # 内规文件编号(与文号并存的双编号)
     source_created_by: Mapped[str | None] = mapped_column(String(64))  # 源系统创建人(≠created_by)
-    # 源法规版本链(ZNFG_IAM_LAW_BASIC.SOURCE_LAW_ID,迁移 0015):supersedes 自动生成来源(D 版本链登记)
-    source_law_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    # 源法规版本链(ZNFG_IAM_LAW_BASIC.SOURCE_LAW_ID=VARCHAR(256),迁移 0015→0016 拓宽):版本链源
+    source_law_id: Mapped[str | None] = mapped_column(String(256), index=True)
 
 
 class Chunk(AuditMixin, Base):
@@ -128,9 +129,9 @@ class Chunk(AuditMixin, Base):
     )
     clause_path: Mapped[str | None] = mapped_column(String(512))
     clause_path_norm: Mapped[str | None] = mapped_column(String(512))
-    # 源条款锚(ZNFG_IAM_LAW_CONTENT.CODE,迁移 0015):案例桥接由 fuzzy title 对齐升级为
-    # CASE_PUNISH.LAW_CONTENT_CODE 精确直连的落点;非 preseg 源恒 None(回落 fuzzy align)
-    source_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    # 源条款锚(ZNFG_IAM_LAW_CONTENT.CODE=VARCHAR(256),迁移 0015→0016 拓宽):案例桥接由 fuzzy
+    # title 对齐升级为 CASE_PUNISH.LAW_CONTENT_CODE 精确直连的落点;非 preseg 源恒 None(回落 fuzzy)
+    source_code: Mapped[str | None] = mapped_column(String(256), index=True)
     seq: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
     breadcrumb: Mapped[str | None] = mapped_column(String(512))  # 面包屑前缀

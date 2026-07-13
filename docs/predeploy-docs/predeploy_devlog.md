@@ -346,3 +346,37 @@ CODE 丢了)。
 全仓 ruff `All checks passed!`;1075 tests collected 0 error;触及面集成 213 passed/5 skipped(模型门,真 PG 5432)。
 迁移 0015 已 `alembic upgrade` 主测试栈。**遗留**:①端到端 `test_preseg_e2e`(模型门)在真栈补跑一次含新契约批次;
 ②**报备甲方**:案例桥接 fuzzy→精确(质量提升,ref_unresolved 假阴大幅降)并入 D2 页码降级报备;③部署 seam 清单待样例锁定。
+
+## 2026-07-14(续)Codex review 修复 + 重大发现:知识库结构.md 有损,真 schema 在图片
+
+**⚠ 重大发现**:用户提供的 `东方/东方知识库/知识库结构.md` 是**有损精简版**;完整 schema 是
+`东方/东方知识库/图片/IMG_1109-1123.HEIC`(一份带 Field/Type/Nullable/Description 表 + mermaid 的英文 md 截图)。
+md 漏了安全/正确性相关的列,Codex 逐图核对后报出。**真 schema 关键补正**(HEIC→PNG 核对):
+- `ZNFG_IAM_LAW_BASIC.SCOPE INT(10)`:**0=外规 / 1=内规 / 2=标准**——权威内外规分类列(md 完全没有)。
+- `SUIT_OBJ_CODE VARCHAR(180)`=适用对象(entity_type 源)、`ABOLISH_CODE VARCHAR(2048)`=废止引用、
+  `NEW_CODE`/`NEW_CONTENT_CODE`/`NEW_PATH_CODE`=换码映射、`HAS_CONTENT`、`CREATOR_ID/UPDATOR_ID`(source_created_by 源)。
+- **列宽**:`LAW_CONTENT.CODE VARCHAR(256)`、`LAW_BASIC.CODE VARCHAR(180)`、`SOURCE_LAW_ID VARCHAR(256)`、
+  `NAME VARCHAR(400)`、`DOC_NO VARCHAR(2000)`、`ISSUE_AUTH_CN VARCHAR(4000)`、`PATH_CODE VARCHAR(1020)`。
+- `DEL_FLAG VARCHAR(4) **NULL**`、日期为 `DATE(13)`/`TIMESTAMP(36,6)`。
+
+**Codex 10 findings 全处置**(1 critical + 8 warning + 1 suggestion):
+- **[critical] SCOPE fail-open**:导出器原用 `LEVELS` 猜内外规且缺省 P-EXT/public → 内规可能被标 public 越权披露。
+  修:`classify_scope(SCOPE)` 权威映射(0→P-EXT/public、1→P-INT/internal、2→P-EXT/internal 密级保守),
+  **未知/空 → 拒收该件不导出(fail-closed),绝不默认 public**。
+- **[warn] 列宽**:源键列宽 > PG 列宽会 S0/S3 DataError 断批。修:迁移 0016 拓宽键列 `chunks.source_code`/
+  `doc_versions.source_doc_id`/`source_law_id` 64→256;描述列 `_fit` 按 PG 宽截断 + 审计告警(不断批);键超 256 拒收(不截断破幂等)。
+- **[warn] 日期规范化**:达梦返回 date/datetime,`str(datetime)` 含时分秒 → S0 `fromisoformat` 静默落 None。
+  修:`_date()` 统一 ISO 日期(datetime 取 `.date()`)。
+- **[warn] DEL_FLAG NULL 漏行**:`DEL_FLAG <> 'D'` 对 NULL 求值 UNKNOWN 在库端静默排除。修:SQL 改 `(DEL_FLAG IS NULL OR <> 'D')`(全 5 查询)。
+- **[warn] 桥接顺序依赖(F7)**:精确桥接在案例 S4 当下查 chunks,同批法规未到 S3 时锚查空→固化 fuzzy/unresolved 无重试;
+  `_drive_batch` worker 引擎不保证法规先于案例。修:`reconcile_preseg_case_refs` **批后对账**重解析 `ref_unresolved` 案例
+  (定点改两列,不经 merge 覆盖),接进 `preseg_ingest.run`;跨批亦自愈。回归测 `test_reconcile_fixes_case_first_ordering`。
+- **[warn] 陈旧产物**:复用 out_dir 时空 cases 不删旧 `cases.jsonl` → 旧案例再摄取。修:`_clean_out_dir` 落盘前清 blocks/cases/manifest。
+- **[warn] 文件名碰撞**:`_safe_filename` 非单射(A/B 与 A?B 同名)。修:基名 + `sha1(CODE)[:8]` 后缀 + seen_files 去重。
+- **[warn] 快照一致性 + N+1**:每查询新连接 → 主/子表异时点。修:全导出**单连接单事务**(尽力 REPEATABLE READ)。
+- **[warn] 凭证进 argv**:`--dsn` CLI 泄露凭证。修:**去 --dsn**,DSN 仅走 env `PRESEG_SOURCE_DSN`。
+- **[sugg] PATH_CODE 词法序**:字符串排序 1.10<1.2 误序。修:blocks 按 `INDEX_NO`(源 0-based 序)+ CODE 排,不按 PATH_CODE 串。
+
+**seam 更新**:内外规分型不再是 seam(SCOPE 权威已接);biz_domain/entity_type 源=`SUIT_OBJ_CODE`(待值域/编码表);
+source_created_by=`CREATOR_ID`(待接)。**验证**:迁移 0016 已 upgrade 主栈;全仓 ruff 绿;1082 collect 0 error;
+export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿。

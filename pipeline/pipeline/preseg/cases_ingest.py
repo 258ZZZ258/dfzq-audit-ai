@@ -127,6 +127,54 @@ def use_structured_case(dv, profiles: dict) -> bool:
     )
 
 
+def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
+    """批后对账:重解析本批 preseg 案例中 ``ref_unresolved`` 的引用(顺序竞态自愈)。
+
+    精确桥接在案例 S4 当下查 chunks——若同批被引法规此刻尚未跑到 S3,``resolve_exact`` 返 None
+    → 当场固化 fuzzy/unresolved,无重试。``_drive_batch`` 的 worker 引擎不保证"法规先于案例"顺序
+    (Codex)。故整批推进后重跑一次 ``_align_violated``:此时法规已建块,anchored 引用即精确命中。
+    仅改 ``cited_regulations``/``ref_unresolved`` 两列(定点 update,不经 merge 覆盖其余列)。
+    返回更新的案例数。跨批同理——被引法规在更早批次也能补上。
+    """
+    from sqlalchemy import select
+
+    from common.pg_models import Case, Document
+    from pipeline.meta.reg_lookup import PgRegLookup
+
+    with ctx.db.session() as s:
+        targets = [
+            (dvid, raw_key)
+            for dvid, raw_key in s.execute(
+                select(DocVersion.doc_version_id, DocVersion.raw_object_key)
+                .join(Document, DocVersion.logical_id == Document.logical_id)
+                .join(Case, Case.doc_version_id == DocVersion.doc_version_id)
+                .where(
+                    DocVersion.batch_id == batch_id,
+                    DocVersion.source_format == "preseg",
+                    Document.corpus_type == "P-CASE",
+                    Case.ref_unresolved.is_(True),  # 仅重试仍有未解析引用者
+                )
+            )
+        ]
+    if not targets:
+        return 0
+    lookup = PgRegLookup(ctx.db)
+    updated = 0
+    for dvid, raw_key in targets:
+        rec = json.loads(ctx.object_store.get(raw_key).decode("utf-8"))
+        aligned, unresolved = _align_violated(rec.get("violated_regulations") or [], lookup)
+        with ctx.db.session() as s:
+            case = s.get(Case, dvid)
+            if case is None or (
+                aligned == case.cited_regulations and unresolved == case.ref_unresolved
+            ):
+                continue  # 无改善 → 不写
+            case.cited_regulations = aligned
+            case.ref_unresolved = unresolved
+        updated += 1
+    return updated
+
+
 def _align_violated(vregs: list, lookup) -> tuple[list, bool]:
     """违反法规子表 → cited_regulations(**精确桥接优先,fuzzy 回落**),保序。
 
