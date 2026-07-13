@@ -83,6 +83,8 @@ def test_register_fixture_batch_full_fields(reg):
         assert dv.version_status == "effective" and dv.version_status_source == "source"
         assert dv.tags == ["招揽", "展业"]
         assert dv.issuer_level_src == "部门规章"
+        assert dv.source_law_id == "KB-EXT-0000-PRE"  # CP-010 版本链源(provenance)
+        assert dv.invalid_date is None  # 仍有效 → 无失效日期
         doc = s.get(Document, dv.logical_id)
         assert doc.corpus_type == "P-EXT"  # 检索分区归属(口径钉子)
 
@@ -92,6 +94,8 @@ def test_register_fixture_batch_full_fields(reg):
         dv = s.get(DocVersion, int_.doc_version_id)
         assert dv.version_status == "effective" and dv.version_status_source is None
         assert dv.file_no == "ZD-2024-005"
+        assert str(dv.invalid_date) == "2026-12-31"  # 失效日期落库(provenance,不改效力状态)
+        assert dv.source_law_id is None
         q = s.scalars(
             select(ReviewQueue).where(
                 ReviewQueue.doc_version_id == int_.doc_version_id,
