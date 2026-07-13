@@ -93,6 +93,8 @@ class DocVersion(AuditMixin, Base):
     doc_number: Mapped[str | None] = mapped_column(String(128))  # 发文字号
     issue_date: Mapped[date | None] = mapped_column(Date)
     effective_date: Mapped[date | None] = mapped_column(Date)  # 生效日期(upcoming 判定 + 时间窗)
+    # 失效日期(源 INVALID_DATE,CP-010 内网对齐,迁移 0015):与 effective_date 成对,abolished 判定
+    invalid_date: Mapped[date | None] = mapped_column(Date)
     title: Mapped[str | None] = mapped_column(String(512))
 
     version_relation: Mapped[str | None] = mapped_column(String(32))  # revise_replace|abolish_only
@@ -113,6 +115,8 @@ class DocVersion(AuditMixin, Base):
     tags: Mapped[list | None] = mapped_column(JSONB)  # 源标签
     file_no: Mapped[str | None] = mapped_column(String(128))  # 内规文件编号(与文号并存的双编号)
     source_created_by: Mapped[str | None] = mapped_column(String(64))  # 源系统创建人(≠created_by)
+    # 源法规版本链(ZNFG_IAM_LAW_BASIC.SOURCE_LAW_ID,迁移 0015):supersedes 自动生成来源(D 版本链登记)
+    source_law_id: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class Chunk(AuditMixin, Base):
@@ -124,6 +128,9 @@ class Chunk(AuditMixin, Base):
     )
     clause_path: Mapped[str | None] = mapped_column(String(512))
     clause_path_norm: Mapped[str | None] = mapped_column(String(512))
+    # 源条款锚(ZNFG_IAM_LAW_CONTENT.CODE,迁移 0015):案例桥接由 fuzzy title 对齐升级为
+    # CASE_PUNISH.LAW_CONTENT_CODE 精确直连的落点;非 preseg 源恒 None(回落 fuzzy align)
+    source_code: Mapped[str | None] = mapped_column(String(64), index=True)
     seq: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
     breadcrumb: Mapped[str | None] = mapped_column(String(512))  # 面包屑前缀

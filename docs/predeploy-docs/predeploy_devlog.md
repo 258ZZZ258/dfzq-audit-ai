@@ -231,3 +231,118 @@ Codex 按 `origin/main...HEAD` 全量审计出 2 Required(F1/F2)+ 1「需确认�
   preseg source_hash,不构成阻塞;真部署前若已有 preseg 数据则需清理/回填/兼容旧哈希。
 - **验证**:reader + s0 共 49 passed / 1 skipped(模型门);全仓 612 收集 0 error;ruff 绿。属 PR#47 Codex
   第四轮 review——Codex 结论:修此条 + 补测试后即可进最终合并复审。
+
+## 2026-07-14 真实内网库(ZNFG_IAM_LAW_* 8 表)到手 → 对齐重构(CP-010 续)
+
+拿到甲方内网**真实数据库表结构**(`东方/东方知识库/知识库结构.md`,照片识别整理:8 表)。
+**关键背景**:调研报告 v0.2 与 SPEC-PRESEG 是基于**UI 表头截图**做的(报告 §2.1 明确"类型全未知、
+均待样例"),现在是真 DB schema——比当年假设精确得多。**接缝设计成立**(源形态落在"薄转换脚本"位置),
+但真 schema ① 解锁两个当年被迫放弃的结构红利,② 填实几处"待样例"空白,③ 暴露一处口径出入。
+
+### 8 表 → 现契约/PG 映射(逐表)
+
+- `ZNFG_IAM_LAW_BASIC`(法规主)→ manifest 行 + doc_versions:`CODE`→source_doc_id(**逻辑键,跨版本稳**)·
+  `NAME`→title · `DOC_NO`→doc_number/file_no · `ISSUE_AUTH_CN`→issuer · `EFFECT/INVALID_DATE`→生效/失效 ·
+  `STATUS_CODE`→效力(→status_map)· `LEVELS`→issuer_level_src · `TAG`→tags · `SOURCE_LAW_ID`+`MODIFY_INFO`→版本链 ·
+  `DEL_FLAG`(A/D/U)→软删 · `DATA_VERSION`→版本。
+- `ZNFG_IAM_LAW_CONTENT`(章节/条文)→ blocks/<law>.jsonl:`IS_CATALOG`=1 章节标题块(不成 chunk)/=0 正文 ·
+  `TITLE`→clause_label · `INDEX_NO`→block_seq · **`PATH_CODE`→权威层级路径** · `CONTENT`→text · **`CODE`→源条款锚**。
+- `ZNFG_IAM_LAW_CONTENT_DETAIL`(详情)→ `CONTENT_TYPE` 0文本拼入 / 1图片 / 2视频。
+- `ZNFG_IAM_LAW_CASE_BASIC`(案件主)→ cases.jsonl:`CODE`→source_case_id · `NAME`→case_name ·
+  `PUB_AUTH_CN`→issuing_org · `EVENT_DATE`→occurred_at · `CASE_DESC`→description · `SUMMARY`→problem_summary ·
+  `URL`→source_url · `PUNISH_BASIS`(处罚依据全文)。
+- `ZNFG_IAM_LAW_CASE_PARTY`(涉案主体)→ persons[] JSONB(D6):真表 20+ 列(罚没金额/证券代码/行业/地区/板块/
+  经办人…),JSONB 原样承载,转换脚本带全。
+- `ZNFG_IAM_LAW_CASE_PUNISH`(处罚依据,**桥接核心**)→ violated_regulations→cited_regulations:
+  **`LAW_CODE`+`LAW_CONTENT_CODE`=源已算好的精确条款外键** · `PUNISH_LAW_TITLE`→title · `PUNISH_LAW`→content。
+- `TB_INFA_PUSH`/`_INFO`(ETL)→ import_batches/增量:`WORKFLOW_RUN_ID`→批次 · `BUSI_DATE`+`ETL_STATUS`→增量/回滚。
+
+### 决策(用户逐项拍板 2026-07-14)
+
+- **交付形态**=**内网可直连源库**:转换脚本直接 SELECT 8 表。**源库=达梦 DM8**(2026-07-14 用户确认)——
+  DM 大量兼容 Oracle,正对上 schema 的 NUMBER(0)/TIMESTAMP(36,6)/TEXT-CLOB/Snowflake ID 形态。
+  驱动 `dmPython`(DBAPI)+ SQLAlchemy `dm` 方言(`sqlalchemy-dm`);DSN 走 config/env,不硬编码凭证。
+  **信创注意**:dmPython 是达梦官方轮子,需内网从达梦装包源装(离线),不在 PyPI 常规源——P5 部署清单列明。
+- **本轮捕获红利**=精确案例桥接 · 权威条款层级 · 版本链登记(三项动管线)+ 效力状态填实 · 富涉案主体(两项仅转换脚本)。
+- **本轮跳过**=图片/视频(`CONTENT_DETAIL.CONTENT_TYPE=1/2`):当前契约无富媒体概念,纯文本优先,**仅记录**留二期。
+
+### 最大红利:案例桥接 fuzzy → 精确(否决"维持现状")
+
+现 `cases_ingest.extract_case_structured` 拿 `{title, clause_label}` 走 `align_cited`+`PgRegLookup` **模糊匹配**
+(文号/标题命中 + 条号归一比对末段),会 `ref_unresolved` 失败。而 `CASE_PUNISH.LAW_CONTENT_CODE` 是**源系统已算好
+的精确外键**——SPEC 背景"案例→法规链接现成"说的就是它,但**当前实现没用**(老契约 `{title,clause_label,content}` 把
+CODE 丢了)。
+- **机制**:chunks 加 `source_code` 存 `LAW_CONTENT.CODE` → 摄取案例时用 `LAW_CONTENT_CODE` **确定性反查**目标条款的
+  `doc_no + clause_path_norm` → 喂**完全不变的** query 侧 bridge(`norm_ref = 文号|条款路径`)。
+- **不碰红线**:是**摄取期落库**(不是检索后回查 PG 装 citation),query/输出契约/检索架构**零改**;无 CODE 时(非 preseg
+  批次)**回落** align_cited,行为兼容。属**质量提升非降级**(`ref_unresolved` 大幅下降),与 D2 页码降级一并向甲方报备。
+- **否决**:❌ 改 query 侧 bridge 键为 CODE——跨仓、破 `norm_ref` 契约、波及 audit-biz,得不偿失;精确反查放摄取侧即可,
+  bridge 一字不改。
+
+### 权威层级 & 版本/效力填实
+
+- **层级**:`derive.py` 从 `clause_label` 文本正则推 norm、推不出落伪路径 `preseg/{seq}`+`preseg_raw`。真表给 `PATH_CODE`
+  (层级路径)+`INDEX_NO`(顺序)+`IS_CATALOG`(目录/正文判别=正好"章节点不出 chunk")→ **权威、零推导失败**。adapter 带源
+  路径直接用,无源回落 derive(兼容非 preseg 批次)。
+- **效力/版本**:status_map(D3)当年是草案 + "待真值域";现 `STATUS_CODE`/`EFFECT_DATE`/`INVALID_DATE` 是真效力字段,
+  `SOURCE_LAW_ID`/`MODIFY_INFO`/`DATA_VERSION` 是真版本链依据 → 填实。
+
+### 口径出入(留痕待核)
+
+裁字典那次(2026-07-09)依据是"甲方已把**业务类别/适用对象**预结构化"(《表头整理.xlsx》=UI 表头)。但真 DB `LAW_BASIC`
+**无 业务类别/适用对象 专列**(只有 `TAG`/`LEVELS`/`FORBIDDEN_MSG`)→ `biz_domain`/`entity_type` 源头**现不明**(可能藏
+`TAG`、可能 UI 派生、可能未拍到的表)。**默认处置**:能从 `TAG` 解析就映射,否则留空(D7 过滤本就暂缓),不阻塞;真值域待
+甲方对接会确认。
+
+### Phase 0 已落(add-only 迁移 0015 + 模型)
+
+- `chunks.source_code`(String(64),index)——精确桥接锚。
+- `doc_versions.invalid_date`(Date)——失效日期,与 effective_date 成对。
+- `doc_versions.source_law_id`(String(64),index)——版本链源。
+- 三列均可空无回填,对既有行安全;版本链/效力其余列(source_doc_id/content_hash/version_status/version_status_source/
+  effective_date/version_relation/supersedes_version_id/tags…)迁移 0013/0014 已在,**不重复加**。
+- **冻结不动**(SPEC §7 Never):chunk_id 公式 · 写序 PG→Milvus→flush→INDEXED · query 侧 bridge/输出契约/检索架构 · 状态机。
+
+### 落地进度(2026-07-14 同日)
+
+- **P1 契约扩展**(reader):blocks +`source_code`/`clause_path_norm`/`is_catalog`;vregs +`law_code`/`law_content_code`;
+  沿用 Codex 四轮"坏类型整文件拒收"严校验。**钉子**:`blocks_content_hash` canon **纳入三新字段**——`clause_path_norm`
+  进 chunk_id、`source_code` 决定桥接、`is_catalog` 决定成不成块,不纳入则"仅改结构元数据"的变化件被误判 DUPLICATE 漏更新
+  (preseg 未上真环境,改 canon 无存量哈希冲突)。
+- **P2 权威层级**(adapter/ChunkSpec/S3):`is_catalog`(源 IS_CATALOG,权威)优先判目录块不成 chunk,`clause_path_norm`
+  (源 PATH_CODE 算好)优先做 norm——**有权威路径即真条款,绝不落 preseg_raw 伪路径**;缺失回落 derive(向后兼容非源批次)。
+  `ChunkSpec.source_code`→`chunks.source_code`(S3 落库)。
+- **P3 精确桥接**(reg_lookup/cases_ingest,**最高价值**):`PgRegLookup.resolve_exact(law_content_code)` 取**同一 chunk 及其
+  doc_version** 的 `doc_no`+`clause_path_norm`——与 query 侧对该条款算的 `norm_ref` 键**逐位一致**,桥接确定性点亮。
+  `_align_violated`:有锚精确直连(`match=exact`)、无锚/锚未入库回落 `align_cited` fuzzy(`match=fuzzy`,保序,不静默丢)。
+  **红线核对**:摄取期落库、非检索后回查装 citation;query 侧 bridge/输出契约**一字未改**;限 effective P-EXT(同 fuzzy 语义)。
+  **验证**:`query/tests/test_preseg_bridge_integration.py` 绿 = 端到端点亮。
+- **P4 效力/版本填实**(reader/s0):契约补 `source_law_id`(版本链源)+`invalid_date`(失效日期),S0 接进 doc_versions。
+  **钉子**:`invalid_date` 仅作 **provenance / 时间窗展示**,**不做"日期过期→abolished"推断**——D3 效力状态由 `effective_status`
+  →`status_map` **源权威**,日期推断会与之冲突。`STATUS_CODE` 真值域仍未知(schema 只标"法规状态"),`status_map` 草案沿用
+  (未知值→meta_confirm),真码表由 P5 转换脚本/甲方对接会锁。fixture manifest 重生成为 21 列。
+- **验证累计**:reader 35 / adapter 15+S3 / s0 / cases_ingest(精确桥接 PG 集成)/ 桥接集成 —— 全套 190+ passed / 模型门 skip;
+  迁移 0015 已 `alembic upgrade` 到主测试栈(5432 audit_pipeline);ruff 全绿。**契约破坏性变更(SPEC §7 Ask-first)**:blocks/vregs/
+  manifest 均扩展——已由用户"捕获结构红利"决策授权,转换脚本(P5)按新契约产出。
+
+### P5 转换脚本(直连达梦)已落
+
+- **模块**:`pipeline/preseg/export.py`(纯转换:blocks/case/manifest 装配,FakeSource 可单测)+
+  `pipeline/preseg_export.py`(`python -m pipeline.preseg_export <out_dir>`:DmSource 达梦 SQLAlchemy 直连 + 编排落盘)。
+  达梦 DSN 走 env `PRESEG_SOURCE_DSN`(不硬编码方言/凭证);两步分离——导出可离线核对产物,灌库(preseg_ingest)另跑。
+- **高置信已做实**(不依赖未知项):`LAW_CONTENT.CODE`→blocks.source_code、`CASE_PUNISH.LAW_CONTENT_CODE`→精确桥接锚、
+  `IS_CATALOG`→is_catalog 权威、CASE_PARTY 全字段→persons(D6)、`DEL_FLAG≠D` 过滤、content_hash=`blocks_content_hash`
+  (声明==实际,幂等健壮)。
+- **验证**:`test_preseg_export.py` 3 测——转换产物 **round-trip 过 reader 接收契约**(不 PresegFormatError)、精确锚串上
+  (law_content_code==block.source_code)、删除/空件过滤、content_hash 确定。零栈。
+- **部署 seam 清单(达梦真样例/甲方对接会锁定)**:①`PATH_CODE`→clause_path_norm 格式(暂省→adapter 从 TITLE 派生,
+  is_catalog 权威仍生效)②`STATUS_CODE` 值域(暂透传→status_map 未知值 meta_confirm)③`LEVELS`→内/外规分型 + 密级
+  ④biz_domain/entity_type 源头(schema 无专列,§口径出入)⑤日期字段达梦返回型/格式 ⑥`DEL_FLAG=U` 处置 ⑦`supersedes`
+  由 `SOURCE_LAW_ID`/`MODIFY_INFO` 生成的格式(现暂 source_law_id 存原值 + 同 source_doc_id 换 hash 自动 revise_replace)。
+  ⑧**dmPython 驱动**信创内网离线装(达梦官方轮子,非 PyPI 常规源)。
+
+### P6 验收
+
+全仓 ruff `All checks passed!`;1075 tests collected 0 error;触及面集成 213 passed/5 skipped(模型门,真 PG 5432)。
+迁移 0015 已 `alembic upgrade` 主测试栈。**遗留**:①端到端 `test_preseg_e2e`(模型门)在真栈补跑一次含新契约批次;
+②**报备甲方**:案例桥接 fuzzy→精确(质量提升,ref_unresolved 假阴大幅降)并入 D2 页码降级报备;③部署 seam 清单待样例锁定。
