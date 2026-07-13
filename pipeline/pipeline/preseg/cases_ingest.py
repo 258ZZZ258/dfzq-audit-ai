@@ -127,23 +127,51 @@ def use_structured_case(dv, profiles: dict) -> bool:
     )
 
 
+def _align_violated(vregs: list, lookup) -> tuple[list, bool]:
+    """违反法规子表 → cited_regulations(**精确桥接优先,fuzzy 回落**),保序。
+
+    每条:有 ``law_content_code`` 且锚在库(effective P-EXT)→ 精确取**同一 chunk** 的
+    ``doc_no``+``clause_path_norm``(与 query 侧 ``norm_ref`` 逐位一致,``resolved=True``,exact);
+    否则单条走 ``align_cited`` fuzzy 标题对齐(fuzzy,保序)。任一未解析 → 聚合 ``ref_unresolved``
+    (仅置标记,不阻塞入库,§9)。``match`` 字段供观测精确/模糊命中比,query 侧忽略不消费。
+    """
+    from pipeline.meta.case_ref_align import align_cited
+
+    out: list = []
+    unresolved = False
+    for v in vregs:
+        lcc = v.get("law_content_code")
+        exact = lookup.resolve_exact(lcc) if lcc else None
+        if exact is not None:
+            out.append({
+                "doc_no": exact["doc_no"],
+                "title": v.get("title") or exact["title"],
+                "clause_path_norm": exact["clause_path_norm"],
+                "resolved": True,
+                "match": "exact",
+            })
+            continue
+        rows, u = align_cited([{"title": v.get("title"), "clause": v.get("clause_label")}], lookup)
+        for r in rows:
+            r["match"] = "fuzzy"
+        out.extend(rows)
+        unresolved = unresolved or u
+    return out, unresolved
+
+
 def extract_case_structured(ctx: StageContext, dv: DocVersion) -> None:
     """源案例记录(raw JSON)→ cases 行直装:**零 LLM、零正则抽取**。
 
-    违反法规子表经 ``align_cited``+``PgRegLookup``(纯逻辑,复用)归一对齐——结构化数据
-    仍需对齐验证(源给的是标题+条款标识,库内锚点是 doc_no+clause_path_norm);对齐失败
-    照旧仅置 ``ref_unresolved`` 标记不阻塞(§9 现状口径)。persons 原样照存(D6)。
-    respondent 单值列 = persons 首条(兼容既有消费面);全量在 persons。
+    违反法规子表经 ``_align_violated`` 归一对齐:**有源锚(law_content_code)→ 精确直连;无锚 →
+    ``align_cited``+``PgRegLookup`` fuzzy 标题对齐**(源给的是标题+条款标识,库内锚点是
+    doc_no+clause_path_norm);对齐失败照旧仅置 ``ref_unresolved`` 标记不阻塞(§9 现状口径)。
+    persons 原样照存(D6)。respondent 单值列 = persons 首条(兼容既有消费面);全量在 persons。
     """
-    from pipeline.meta.case_ref_align import align_cited
     from pipeline.meta.reg_lookup import PgRegLookup
 
     rec = json.loads(ctx.object_store.get(dv.raw_object_key).decode("utf-8"))
-    cited_in = [
-        {"title": v.get("title"), "clause": v.get("clause_label")}
-        for v in rec.get("violated_regulations") or []
-    ]
-    aligned, unresolved = align_cited(cited_in, PgRegLookup(ctx.db))
+    vregs = rec.get("violated_regulations") or []
+    aligned, unresolved = _align_violated(vregs, PgRegLookup(ctx.db))
 
     persons = rec.get("persons") or []
     first = persons[0] if persons else {}

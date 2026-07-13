@@ -103,10 +103,11 @@ def test_structured_ingest_aligns_and_lands(ingested):
     assert len(case.persons) == 2 and case.persons[1]["reason"] == "管理失职"
     assert str(case.occurred_at) == "2024-11-02"
     assert case.source_url == "http://kb.internal/case/12"
-    # 对齐:标题精确命中 ext-001(effective P-EXT),条号 21 末段命中 "1/21"
+    # 精确桥接:law_content_code=LC-EXT001-021 → 同一 chunk 的 doc_no+clause_path_norm(=1/21)
     (ref,) = case.cited_regulations
     assert ref["resolved"] and ref["doc_no"] == "证监会令第300号"
-    assert ref["clause_path_norm"].endswith("21")
+    assert ref["clause_path_norm"] == "1/21"  # 取自锚定 chunk 本身(非 fuzzy 末段推断)
+    assert ref["match"] == "exact"  # CP-010:走精确直连而非模糊标题对齐
     assert case.ref_unresolved is False
 
 
@@ -116,11 +117,12 @@ def test_alignment_failure_sets_flag_not_block(ingested):
     _run_case(ctx, dvid)
     case = ctx.db.get_case(dvid)
     refs = {r["title"]: r for r in case.cited_regulations}
-    # 插入条+款级(第二十一条之一第二款):舍款取条 → 命中 "…/21-1"
+    # 精确锚 law_content_code=LC-EXT001-021-1 → 命中 "1/21-1"(款级天然舍款取条,D5)
     ok = refs["证券公司客户招揽管理办法"]
-    assert ok["resolved"] and ok["clause_path_norm"].endswith("21-1")
-    # 不存在的规章 → 未解析;整案置标记但**已入库**(不阻塞,§9 现状口径)
-    assert refs["不存在的规章名称"]["resolved"] is False
+    assert ok["resolved"] and ok["clause_path_norm"] == "1/21-1" and ok["match"] == "exact"
+    # 无锚 + 标题不存在 → 回落 fuzzy → 未解析;整案置标记但**已入库**(不阻塞,§9)
+    bad = refs["不存在的规章名称"]
+    assert bad["resolved"] is False and bad["match"] == "fuzzy"
     assert case.ref_unresolved is True
 
 
@@ -161,3 +163,49 @@ def test_config_seam_flips_back_to_llm_path(env, monkeypatch):
     monkeypatch.setattr(case_extract, "extract_case", spy)
     _run_case(ctx, dvid)
     assert called.get("l1")  # 退回 L1 抽取路径
+
+
+# ── _align_violated 纯函数(零栈:fake lookup;精确优先 / 无锚·未命中回落 fuzzy)────────
+
+
+class _FakeLookup:
+    def __init__(self, exact=None, doc=None):
+        self._exact = exact or {}  # source_code -> {doc_no, clause_path_norm, title}
+        self._doc = doc  # find() 返回的 RegDoc(None=未命中)
+
+    def resolve_exact(self, code):
+        return self._exact.get(code)
+
+    def find(self, doc_number, title):
+        return self._doc
+
+
+class TestAlignViolatedPure:
+    def test_exact_anchor_wins(self):
+        from pipeline.preseg.cases_ingest import _align_violated
+
+        lk = _FakeLookup(
+            exact={"LC-1": {"doc_no": "DN-1", "clause_path_norm": "2/5", "title": "T"}}
+        )
+        out, unresolved = _align_violated([{"title": "《X》", "law_content_code": "LC-1"}], lk)
+        assert out[0] == {
+            "doc_no": "DN-1", "title": "《X》", "clause_path_norm": "2/5",
+            "resolved": True, "match": "exact",
+        }
+        assert unresolved is False  # 精确命中不查 find()
+
+    def test_no_anchor_falls_to_fuzzy(self):
+        from pipeline.preseg.cases_ingest import _align_violated
+
+        lk = _FakeLookup(doc=None)  # 无 law_content_code → fuzzy;find None → 未解析
+        out, unresolved = _align_violated([{"title": "《X》", "clause_label": "第五条"}], lk)
+        assert out[0]["match"] == "fuzzy" and out[0]["resolved"] is False
+        assert unresolved is True
+
+    def test_anchor_miss_falls_to_fuzzy(self):
+        from pipeline.preseg.cases_ingest import _align_violated
+
+        # 有 law_content_code 但库内无此锚(resolve_exact None)→ 回落 fuzzy(不静默丢)
+        lk = _FakeLookup(exact={}, doc=None)
+        out, _ = _align_violated([{"title": "《X》", "law_content_code": "LC-missing"}], lk)
+        assert out[0]["match"] == "fuzzy"

@@ -37,6 +37,32 @@ class PgRegLookup:
             )
         ).first()
 
+    def resolve_exact(self, source_code: str) -> dict | None:
+        """CP-010 精确桥接:源条款锚 ``LAW_CONTENT.CODE`` → 命中 chunk 的
+        ``{doc_no, clause_path_norm, title}``。
+
+        限 effective **P-EXT**(与 ``find`` 同语义:案例引用外规,勿误取内规/案例 chunk)。
+        ``doc_no``/``clause_path_norm`` 取自**同一 chunk 及其 doc_version**——与 query 侧对该条款
+        算出的 ``norm_ref`` 键逐位一致,桥接确定性点亮(替代 fuzzy,消除 ``ref_unresolved`` 假阴)。
+        源块超预算二次切分时多 chunk 同 ``source_code``/同 norm,取任一(``first``)即可。
+        未命中(锚未入库/非 effective P-EXT)→ None,调用方回落 fuzzy。
+        """
+        with self._db.session() as s:
+            row = s.execute(
+                select(DocVersion.doc_number, Chunk.clause_path_norm, DocVersion.title)
+                .join(Chunk, Chunk.doc_version_id == DocVersion.doc_version_id)
+                .join(Document, DocVersion.logical_id == Document.logical_id)
+                .where(
+                    Chunk.source_code == source_code,
+                    DocVersion.version_status == "effective",
+                    Document.corpus_type == "P-EXT",
+                )
+            ).first()
+        if row is None:
+            return None
+        return {"doc_no": row.doc_number, "clause_path_norm": row.clause_path_norm,
+                "title": row.title}
+
     def find(self, doc_number: str | None, title: str | None) -> RegDoc | None:
         with self._db.session() as s:
             dv = self._find_ext(s, DocVersion.doc_number == doc_number) if doc_number else None
