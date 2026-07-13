@@ -38,16 +38,24 @@ def build_preseg_specs(
 
     for b in sorted(blocks, key=lambda x: x.block_seq):
         d = derive_norm(b.clause_label)
-        if d.kind == "chapter":  # 结构标题:更新上下文,不成块(换章清空节)
-            chapter, chapter_raw = d.chapter, (b.clause_label or "").strip()
-            section, section_raw = None, None
-            continue
-        if d.kind == "section":
-            chapter = d.chapter or chapter
-            section, section_raw = d.section, (b.clause_label or "").strip()
+        raw = (b.clause_label or "").strip()
+        # 结构标题块:is_catalog(源 IS_CATALOG,权威)优先,回落 derive 的 chapter/section 判别。
+        # 目录节点不出 chunk(与 clause_tree「章节点不出 chunk」一致),仅更新面包屑上下文。
+        if b.is_catalog or d.kind in ("chapter", "section"):
+            if d.kind == "section":
+                chapter = d.chapter or chapter
+                section, section_raw = d.section, raw
+            else:  # chapter,或 is_catalog 但非"第X章/节"形态(如"总则")→ 当章级,清空节
+                chapter, chapter_raw = d.chapter, raw
+                section, section_raw = None, None
             continue
 
-        if d.kind == "article":
+        # 正文块的 norm 与 chunk_type:权威 clause_path_norm(源 PATH_CODE 算好)优先——
+        # 有它即真条款,绝不落伪路径;无则回落 derive(推导失败仍落伪路径,降级留痕)。
+        if b.clause_path_norm:
+            norm = b.clause_path_norm
+            chunk_type = "table" if b.is_table else "clause"
+        elif d.kind == "article":
             parts = [d.chapter or chapter, d.section or section, d.norm]
             norm = "/".join(p for p in parts if p)
             chunk_type = "table" if b.is_table else "clause"
@@ -55,7 +63,7 @@ def build_preseg_specs(
             norm = f"preseg/{b.block_seq}"
             chunk_type = "table" if b.is_table else "preseg_raw"
 
-        label = (b.clause_label or "").strip()
+        label = raw
         breadcrumb = " > ".join(p for p in (chapter_raw, section_raw, label) if p)
         pieces = (
             _split_oversize(b.text, cfg.target_token_max)
@@ -81,6 +89,7 @@ def build_preseg_specs(
                     oversize=hard_cut,
                     chunk_type=chunk_type,
                     entity_type=list(entity_types) if entity_types else None,  # D7 文档级继承
+                    source_code=b.source_code,  # CP-010 精确桥接锚(LAW_CONTENT.CODE),透传到 chunks
                 )
             )
     return specs

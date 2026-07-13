@@ -101,6 +101,40 @@ class TestAdapterPure:
         assert specs[0].page_start is None and specs[0].page_end is None  # D2
 
 
+class TestAdapterAuthoritative:
+    """CP-010 内网对齐:源权威 clause_path_norm(PATH_CODE 算好)/ is_catalog / source_code。"""
+
+    def test_authoritative_norm_wins_and_never_pseudo(self):
+        # label 无法 derive("备注说明"),但源给了权威 norm → 用权威、且是真 clause 非伪路径
+        b = PresegBlock(block_seq=4, text="正文。", clause_label="备注说明",
+                        clause_path_norm="3/21")
+        specs = build_preseg_specs("dv1", [b], CFG)
+        assert specs[0].clause_path_norm == "3/21"
+        assert specs[0].chunk_type == "clause"  # 有权威路径即真条款,绝不 preseg_raw
+        assert specs[0].chunk_id == compute_chunk_id("dv1", "3/21", 0)  # B1 公式不变
+
+    def test_is_catalog_block_not_chunked(self):
+        # is_catalog(源 IS_CATALOG==1)权威:即便 label 非"第X章"形态(如"总则")也不成块
+        blocks = [
+            PresegBlock(block_seq=0, text="总则", clause_label="总则", is_catalog=True),
+            PresegBlock(block_seq=1, text="正文。", clause_label="第一条",
+                        clause_path_norm="1/1"),
+        ]
+        specs = build_preseg_specs("dv1", blocks, CFG)
+        assert len(specs) == 1  # 目录块不出 chunk
+        assert specs[0].clause_path_norm == "1/1"
+
+    def test_source_code_passthrough(self):
+        b = PresegBlock(block_seq=1, text="正文。", clause_label="第二十一条",
+                        source_code="LC-EXT001-021")
+        specs = build_preseg_specs("dv1", [b], CFG)
+        assert specs[0].source_code == "LC-EXT001-021"  # 透传到 chunks.source_code(精确桥接锚)
+
+    def test_no_source_code_is_none(self):
+        specs = build_preseg_specs("dv1", [_b(0, "第一条", "内容")], CFG)
+        assert specs[0].source_code is None  # 自建/无锚批次恒 None → 回落 fuzzy align
+
+
 # ── s3 分支集成(真 PG)──────────────────────────────────────
 
 
@@ -175,3 +209,7 @@ def test_s3_preseg_branch_lands_chunks(env):
     assert all(c.page_start is None for c in chunks)
     ets = {tuple(c.entity_type or []) for c in chunks}
     assert ets == {("证券公司", "证券从业人员")}  # D7 全块继承
+    # CP-010:源条款锚落库(精确桥接键);伪路径块无锚
+    by_norm = {c.clause_path_norm: c for c in chunks}
+    assert by_norm["1/21"].source_code == "LC-EXT001-021"
+    assert by_norm["preseg/4"].source_code is None
