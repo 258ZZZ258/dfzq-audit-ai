@@ -24,15 +24,17 @@ class FakeSource(export.Source):
     def iter_laws(self):
         return [
             {"CODE": "L-1", "NAME": "证券公司客户招揽管理办法", "DOC_NO": "证监会令第300号",
-             "SCOPE": 0, "ISSUE_AUTH_CN": "中国证监会",
-             "ISSUE_DATE": datetime(2024, 1, 15, 9, 30), "EFFECT_DATE": "2024-03-01",
-             "INVALID_DATE": None, "STATUS_CODE": "现行有效", "SOURCE_LAW_ID": "L-0",
-             "LEVELS": "部门规章", "TAG": "招揽;展业", "DEL_FLAG": "A"},
+             "SCOPE": 0, "ISSUE_AUTH_CN": "中国证监会", "SUIT_OBJ_CODE": "证券、基金",
+             "CREATOR_ID": "kb_admin", "ISSUE_DATE": datetime(2024, 1, 15, 9, 30),
+             "EFFECT_DATE": "2024-03-01", "INVALID_DATE": None, "STATUS_CODE": "inuse",
+             "SOURCE_LAW_ID": "L-0", "LEVELS": "部门规章", "TAG": "招揽;展业", "DEL_FLAG": "A"},
             {"CODE": "L-INT", "NAME": "公司内控制度", "SCOPE": 1, "LEVELS": "公司制度",
-             "STATUS_CODE": "现行有效", "DEL_FLAG": "A"},
+             "STATUS_CODE": "inuse", "DEL_FLAG": "A"},
             {"CODE": "L-BADSCOPE", "NAME": "分类不明", "SCOPE": None, "DEL_FLAG": "A"},  # 拒收
+            {"CODE": "L-TEST", "NAME": "测试", "SCOPE": 0, "STATUS_CODE": "test_run",
+             "DEL_FLAG": "A"},  # test_run 跳过
             {"CODE": "L-DEL", "NAME": "已删除", "SCOPE": 0, "DEL_FLAG": "D"},  # 删除件过滤
-            {"CODE": "L-EMPTY", "NAME": "无正文", "SCOPE": 0, "DEL_FLAG": "A"},  # 无 content
+            {"CODE": "L-EMPTY", "NAME": "无正文", "SCOPE": 0, "DEL_FLAG": "A"},
         ]
 
     def contents_for(self, law_code):
@@ -66,9 +68,10 @@ class FakeSource(export.Source):
         ]
 
     def punishes_for(self, case_code):
+        # 真数据语义:PUNISH_LAW=法规名,PUNISH_LAW_TITLE=条款标识(探查 C2)
         return [{"CASE_CODE": "C-1", "LAW_CODE": "L-1", "LAW_CONTENT_CODE": "LC-021",
-                 "PUNISH_INDEX": 0, "PUNISH_LAW_TITLE": "证券公司客户招揽管理办法",
-                 "PUNISH_LAW": "第二十一条", "CONTENT": "违反第二十一条。", "DEL_FLAG": "A"}]
+                 "PUNISH_INDEX": 0, "PUNISH_LAW": "证券公司客户招揽管理办法",
+                 "PUNISH_LAW_TITLE": "第二十一条", "CONTENT": "违反第二十一条。", "DEL_FLAG": "A"}]
 
 
 def _manifest_rows(out_dir):
@@ -93,6 +96,9 @@ def test_build_batch_roundtrips_through_reader(tmp_path):
     # 日期规范化:datetime(含时分秒)→ ISO 日期(否则 S0 fromisoformat 静默 None)
     assert by_code["L-1"]["issue_date"] == "2024-01-15"
     assert by_code["L-1"]["content_hash"]
+    # 适用对象(多值拆 ;-join)+ 源创建人
+    assert by_code["L-1"]["entity_types"] == "证券;基金"
+    assert by_code["L-1"]["source_created_by"] == "kb_admin"
     for r in rows:
         validate_manifest_rows([r])
 
@@ -103,6 +109,8 @@ def test_build_batch_roundtrips_through_reader(tmp_path):
     cases = read_cases(tmp_path / "cases.jsonl")
     v0 = cases[0].violated_regulations[0]
     assert v0.law_content_code == "LC-021" == by_sc["LC-021"].source_code  # 精确锚串上
+    # 真数据语义:title=法规名,clause_label=条款标识(不再反)
+    assert v0.title == "证券公司客户招揽管理办法" and v0.clause_label == "第二十一条"
     assert cases[0].issue_date == "2025-03-18"  # PUB_DATE datetime → ISO 日期
     assert cases[0].persons[0]["fine_amt"] == "5"
 
@@ -113,6 +121,32 @@ def test_unknown_scope_fail_closed(tmp_path):
     assert any("L-BADSCOPE" in s for s in stats["skipped"])
     _, rows = _manifest_rows(tmp_path)
     assert "L-BADSCOPE" not in {r["source_doc_id"] for r in rows}
+
+
+def test_entity_types_multi_delimiter_split():
+    # 真数据 SUIT_OBJ_CODE 中文多值,分隔符混用 顿号/竖线 → 统一拆为 ;-join
+    assert export.entity_types_of("证券、基金") == "证券;基金"
+    assert export.entity_types_of("证券|基金") == "证券;基金"
+    assert export.entity_types_of("通用") == "通用"  # 特殊值原样保留
+    assert export.entity_types_of(None) is None
+
+
+def test_test_run_status_skipped(tmp_path):
+    stats = export.build_batch(FakeSource(), tmp_path)
+    assert any("L-TEST" in s for s in stats["skipped"])  # test_run 测试数据不导出
+    _, rows = _manifest_rows(tmp_path)
+    assert "L-TEST" not in {r["source_doc_id"] for r in rows}
+
+
+def test_status_map_real_domain():
+    from pipeline.preseg.status_map import map_effective_status
+
+    assert map_effective_status("inuse").status == "effective"
+    assert map_effective_status("abolish").status == "abolished"
+    assert map_effective_status("modified").status == "superseded"
+    assert map_effective_status("pending").status == "upcoming"
+    assert map_effective_status("draft").status == "upcoming"
+    assert map_effective_status("weird_val").needs_review is True  # 未知 → meta_confirm
 
 
 def test_classify_scope_mapping():
@@ -166,3 +200,19 @@ def test_deleted_and_empty_laws_filtered(tmp_path):
     export.build_batch(FakeSource(), tmp_path)
     assert not list((tmp_path / "blocks").glob("L-DEL-*.jsonl"))
     assert not list((tmp_path / "blocks").glob("L-EMPTY-*.jsonl"))
+
+
+def test_duplicate_code_rows_deduped(tmp_path):
+    # 真数据(G1/G2):每节点 2 物理行,同 CODE 异 ID,内容一致 → 按 CODE 去重成 1 block
+    class DupSource(FakeSource):
+        def contents_for(self, law_code):
+            base = super().contents_for(law_code)
+            if law_code == "L-1":
+                dup = dict(base[1])  # LC-021 的第二物理行(同 CODE)
+                return base + [dup]
+            return base
+
+    export.build_batch(DupSource(), tmp_path)
+    blocks = read_blocks(next((tmp_path / "blocks").glob("L-1-*.jsonl")))
+    codes = [b.source_code for b in blocks if b.source_code]
+    assert codes.count("LC-021") == 1  # 同 CODE 去重,不产双 block

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
@@ -33,10 +34,16 @@ class PresegExportError(ValueError):
     """转换期不可安全导出(如源键超列宽、分类不可判)——拒收该件,不带病产出。"""
 
 
-# ── 源语义映射(依据真实 schema;仍待样例的以 seam 标注)──────────────────────
+# ── 源语义映射(依据真实 schema + 达梦真数据探查,2026-07-14)──────────────────
 
 #: DEL_FLAG 在册标记:排除 D(删除);A 有效、U 修改视为在册。⚠ U 处置待甲方确认。
 LIVE_DEL_FLAGS = frozenset({"A", "U"})
+
+#: 跳过的 STATUS_CODE:test_run=测试数据(真数据仅 3 条),不入生产库。
+SKIP_STATUS = frozenset({"test_run"})
+
+#: 适用对象多值分隔符(真数据 SUIT_OBJ_CODE 见 顿号、竖线 混用,统一拆)
+_SUIT_OBJ_DELIM = re.compile(r"[、,，|/;;]+")
 
 #: PG 描述列宽(截断上限;键列不在此表——键超宽必须拒收而非截断)
 _COL_WIDTHS = {
@@ -47,11 +54,26 @@ _COL_WIDTHS = {
 _KEY_MAXLEN = 256
 
 
+def entity_types_of(suit_obj_code: object) -> str | None:
+    """SUIT_OBJ_CODE(适用对象,中文多值)→ ``;``-join 串(供 manifest;s0 再按 ``;`` 拆)。
+
+    真数据(探查 A4):中文名直存(通用/证券/基金/期货/其他金融机构…),多值分隔符不统一
+    (顿号、竖线 混用)→ 统一拆再以 ``;`` 规范化。'通用'=不限对象,原样保留。空→None。
+    ⚠ 查询侧 dict_entity_types 词表须换成这套真值(证券/基金/期货…),D7 过滤才对得上——query 侧跟进。
+    """
+    s = _s(suit_obj_code)
+    if not s:
+        return None
+    parts = [p.strip() for p in _SUIT_OBJ_DELIM.split(s) if p.strip()]
+    return ";".join(parts) or None
+
+
 def classify_scope(scope: object) -> tuple[str, str] | None:
     """SCOPE(ZNFG_IAM_LAW_BASIC.SCOPE)→ (corpus_type, perm_tag)。**权威分类,fail-closed**。
 
     0=external→(P-EXT, public);1=internal→(P-INT, internal);2=criterion 标准→(P-EXT, internal)
     (外规分区但密级保守,待甲方确认可否 public);**未知/空 → None(调用方拒收,绝不默认 public)**。
+    真数据(探查 A1):当前全库 SCOPE=0(15,305 部全外规);fail-closed 仍作跨环境健壮兜底。
     """
     try:
         s = int(scope)
@@ -67,8 +89,11 @@ def effective_status_of(status_code: object) -> str:
 
 
 def path_code_to_norm(path_code: object, title: object) -> str | None:
-    """PATH_CODE(VARCHAR(1020) 层级路径)→ clause_path_norm。⚠ seam:**内部分段格式未知 → 返 None**,
-    由 adapter 从 TITLE 派生(is_catalog 权威判目录块仍生效)。真格式确认后在此产出权威 norm。"""
+    """PATH_CODE → clause_path_norm。**返回 None(设计如此,非缺陷)**。
+
+    真数据(探查 B1):PATH_CODE 是**点分的 opaque CODE 路径**(每段是 ``ELA7AF908…`` 这类哈希 ID,
+    仅编码父子祖先关系),**不含可读编号**;人类编号("第X条/章/节")在 **TITLE** 里。故 norm 从 TITLE
+    派生(adapter/derive.py 已做,含内嵌章节),PATH_CODE 的价值仅在祖先关系——本流程不需要,恒 None。"""
     return None
 
 
@@ -137,9 +162,19 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
     - is_catalog = IS_CATALOG==1;source_code = CODE(精确桥接锚,超 256 → 弃锚+告警不崩);
     - 正文取 CONTENT(图片/视频详情本轮跳过);空正文目录节点用 TITLE 兜底成块。
     """
-    ordered = sorted(
-        _live(contents), key=lambda r: (_int(r.get("INDEX_NO")), str(r.get("CODE") or ""))
-    )
+    # 去重:真数据(探查 G1/G2)每节点有 2 物理行(**同 CODE 异 snowflake ID,内容一致**,
+    # 全表 COUNT(DISTINCT CODE)恒=1)→ 按 CODE 保留首见即安全(source_code/文本/norm 都相同,
+    # 桥接不受影响)。无 CODE 行(罕见)不去重,全保留。
+    deduped: list[dict] = []
+    seen_code: set[str] = set()
+    for c in _live(contents):
+        code = _s(c.get("CODE"))
+        if code and code in seen_code:
+            continue
+        if code:
+            seen_code.add(code)
+        deduped.append(c)
+    ordered = sorted(deduped, key=lambda r: (_int(r.get("INDEX_NO")), str(r.get("CODE") or "")))
     out: list[dict] = []
     for seq, c in enumerate(ordered):
         title = _s(c.get("TITLE"))
@@ -179,10 +214,16 @@ def _person(party: dict) -> dict:
 
 
 def _violated(punish: dict) -> dict:
-    """一条 CASE_PUNISH → violated_regulations 条目(**精确桥接锚**)。"""
-    title = _s(punish.get("PUNISH_LAW_TITLE")) or _s(punish.get("PUNISH_LAW")) or "(未标注)"
-    v: dict = {"title": title}
-    if content := _s(punish.get("CONTENT")) or _s(punish.get("PUNISH_LAW")):
+    """一条 CASE_PUNISH → violated_regulations 条目(**精确桥接锚**;字段语义按真数据校正)。
+
+    真数据(2026-07-14 探查 C2):``PUNISH_LAW``=**法规名**(如"上市公司信息披露管理办法(2025年修订)")、
+    ``PUNISH_LAW_TITLE``=**条款标识**(如"第二十二条")——与知识库文档描述相反,**以数据为准**。
+    精确桥接靠 ``LAW_CONTENT_CODE``(真数据 96.7% 命中);title/clause 仅无锚时 fuzzy 回落用,故须摆对。
+    """
+    v: dict = {"title": _s(punish.get("PUNISH_LAW")) or "(未标注)"}  # 法规名
+    if clause := _s(punish.get("PUNISH_LAW_TITLE")):  # 条款标识 第X条(fuzzy 回落)
+        v["clause_label"] = clause
+    if content := _s(punish.get("CONTENT")):
         v["content"] = content
     if lc := _s(punish.get("LAW_CODE")):
         v["law_code"] = lc
@@ -246,9 +287,10 @@ def manifest_row(law: dict, blocks: list[dict], filename: str, warnings: list[st
         tags=_s(law.get("TAG")),
         file_no=_fit(law.get("DOC_NO"), "file_no", warnings),
         source_law_id=_key(law.get("SOURCE_LAW_ID"), "SOURCE_LAW_ID"),
+        entity_types=entity_types_of(law.get("SUIT_OBJ_CODE")),  # 适用对象(D7,写投影)
+        source_created_by=_s(law.get("CREATOR_ID")),  # 源创建人(provenance)
     )
-    # biz_domain=SUIT_OBJ_CODE(适用对象,真列已见)/ entity_types / source_created_by=CREATOR_ID:
-    # 值域/编码表待甲方对接会锁 → 本轮留空(seam),不阻塞
+    # biz_domain:LAW_BASIC 无干净专列(仍 seam);supersedes 由 SOURCE_LAW_ID/ABOLISH_CODE 生成待定
     return row
 
 
@@ -288,6 +330,9 @@ def build_batch(source: Source, out_dir: Path) -> dict:
         code = _s(law.get("CODE"))
         if not code:
             skipped.append("(law 无 CODE)")
+            continue
+        if str(law.get("STATUS_CODE") or "").strip() in SKIP_STATUS:  # test_run 测试数据不入库
+            skipped.append(f"test_run CODE={code}")
             continue
         if code in seen_keys:  # 重复 CODE → 跳过(防同键覆盖/幂等歧义)
             skipped.append(f"重复 CODE={code}")

@@ -12,8 +12,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: 源效力状态 → 四态。⚠ 值域是对甲方 UI 用词的工程假设,真导出到手须校订(Ask-first 增删)。
+#: 源效力状态 STATUS_CODE → 四态。**真值域来自达梦(2026-07-14 探查 A2)**:
+#: inuse 9795 / abolish 3815 / modified 1291 / draft 382 / pending 19 / test_run 3。
+#: - inuse→effective(现行有效)· abolish→abolished(已废止)· modified→superseded(已修订/被替代)
+#: - pending→upcoming(待生效)· draft→upcoming(草案未生效,近似;⚠ 待甲方确认是否单列)
+#: - test_run(3 条测试数据)不入表——由转换脚本层跳过(见 export.SKIP_STATUS),不在此映射
+#: 兼容早期中文别名一并保留(自建/历史批次容错)。未知值 → None(保默认 + meta_confirm,不猜)。
 STATUS_MAP: dict[str, str] = {
+    # 达梦真值域(英文码)
+    "inuse": "effective",
+    "abolish": "abolished",
+    "modified": "superseded",
+    "pending": "upcoming",
+    "draft": "upcoming",
+    # 中文别名(历史/自建容错)
     "现行有效": "effective",
     "有效": "effective",
     "已废止": "abolished",

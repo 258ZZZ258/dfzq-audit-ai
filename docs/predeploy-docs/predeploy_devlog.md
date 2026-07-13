@@ -380,3 +380,26 @@ md 漏了安全/正确性相关的列,Codex 逐图核对后报出。**真 schema
 **seam 更新**:内外规分型不再是 seam(SCOPE 权威已接);biz_domain/entity_type 源=`SUIT_OBJ_CODE`(待值域/编码表);
 source_created_by=`CREATOR_ID`(待接)。**验证**:迁移 0016 已 upgrade 主栈;全仓 ruff 绿;1082 collect 0 error;
 export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿。
+
+## 2026-07-14(再续)达梦真数据探查 → seam 全锁定(用户跑 SQL,`preseg_explore*.sql`)
+
+有了达梦连接后逐项探查真数据(结果图 `东方/东方知识库/sql脚本结果*/`),把 seam 用真值锁死,并纠了多处初版臆测:
+
+- **STATUS_CODE 是英文码不是中文**(A2):inuse 9795 / abolish 3815 / modified 1291 / draft 382 / pending 19 /
+  test_run 3。`status_map` 重写:inuse→effective · abolish→abolished · modified→superseded · pending/draft→upcoming;
+  **test_run(3 条测试数据)转换脚本层跳过**(`SKIP_STATUS`)。
+- **draft = 征求意见稿**(G8 样例名全带"(征求意见稿)",HAS_CONTENT=1、EFFECT_DATE 空)——**非"入库未完成"半成品**;
+  真草案有正文未生效 → `upcoming`(标记未生效,不污染现行法召回)正确。
+- **PUNISH_LAW/PUNISH_LAW_TITLE 语义与文档相反**(C2 真数据):PUNISH_LAW=**法规名**、PUNISH_LAW_TITLE=**条款标识**。
+  `_violated` title/clause **反转 bug 已修**(以数据为准)。
+- **精确桥接真数据命中 96.7%**(C1):11.4万处罚引用,null 锚 0,未命中仅 3,737 → 最大红利被真数据强验证。
+- **SCOPE 全库=0**(A1,15,305 部全外规)→ corpus/perm 实际全 P-EXT/public;classify_scope fail-closed 仍作兜底。
+- **SUIT_OBJ_CODE=中文适用对象多值**(A4,顿号/竖线混用)→ `entity_types_of` 多分隔符拆;`CREATOR_ID→source_created_by` 接上。
+- **PATH_CODE=点分 opaque CODE 路径**(B1,哈希段非可读编号,人类编号在 TITLE)→ `path_code_to_norm` 恒 None **是对的**(TITLE 派生)。
+- **LAW_CONTENT 每节点 2 物理行**(B2)——**同 CODE 异 snowflake ID、内容一致,全表 COUNT(DISTINCT CODE)恒=1**(G1/G2)
+  → `blocks_from_contents` **按 CODE 去重**(保留首见,source_code/文本/桥接不受影响)。
+- **版本链字段 100% 非空**(E1:SOURCE_LAW_ID/ABOLISH_CODE/NEW_CODE 全满)→ 疑占位/自引用,值语义待 E2;自动 supersedes 继续缓。
+
+**查询侧跟进(记待办)**:真适用对象词表=通用/证券/基金/期货/其他金融机构… 与 demo `dict_entity_types`(证券公司/证券从业人员)
+粒度不同 → D7 过滤要对得上须换 query 侧词表。**验证**:全仓 ruff 绿;export 13(含 SCOPE/日期/去重/适用对象/status_map)+
+触及面 117 passed/4 skipped(真 PG)。
