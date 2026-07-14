@@ -250,8 +250,12 @@ def case_record(case: dict, parties: list[dict], punishes: list[dict]) -> dict:
     边界校验:超列宽 → 拒收该案(Codex 二轮 F3);problem_summary/description 是 chunk 文本,不限长。
     """
     persons = [_person(p) for p in sorted(_live(parties), key=lambda r: _int(r.get("PARTY_INDEX")))]
-    if persons:  # 结构化直装把 persons[0].name 投影进 cases.respondent VARCHAR(256) → 边界校验(R4)
-        _bound(persons[0].get("name"), "respondent")
+    if persons:  # cases_ingest 把 persons[0].name **原样**写 cases.respondent VARCHAR(256)
+        nm = persons[0].get("name")  # 按原值长度校验(不 strip:前导空格也会撑爆 PG;Codex 四轮 S4)
+        if nm is not None and len(str(nm)) > _COL_WIDTHS["respondent"]:
+            raise PresegExportError(
+                f"respondent 长度 {len(str(nm))} 超 PG 列宽 {_COL_WIDTHS['respondent']}"
+            )
     vregs = [
         _violated(p) for p in sorted(_live(punishes), key=lambda r: _int(r.get("PUNISH_INDEX")))
     ]
@@ -343,12 +347,12 @@ def build_batch(source: Source, out_dir: Path) -> dict:
     staging = Path(tempfile.mkdtemp(dir=out_dir.parent, prefix=f".{out_dir.name}.staging-"))
     try:
         stats = _build_into(source, staging)
+        if out_dir.exists():  # 空目录 → rmdir(仅空目录,无数据)后 rename 到不存在目标(原子)
+            out_dir.rmdir()
+        os.replace(staging, out_dir)  # 提交阶段也在 try 内:rmdir/replace 失败也清 staging(S5)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)  # 成功后 staging 已成 out_dir,不会误删
         raise
-    if out_dir.exists():  # 空目录 → rmdir(仅空目录,无数据)后 rename 到不存在目标(原子)
-        out_dir.rmdir()
-    os.replace(staging, out_dir)
     stats["out_dir"] = str(out_dir)
     return stats
 

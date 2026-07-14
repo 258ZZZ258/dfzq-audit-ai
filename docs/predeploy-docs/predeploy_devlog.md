@@ -427,9 +427,10 @@ export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿�
 
 ## 2026-07-15 Codex 三轮 review 修复(6 条)+ 版本链探查结论 + 效力映射批准
 
-**explore3 结论**:版本链三字段不可用——`SOURCE_LAW_ID` 全空串(distinct=1)、`NEW_CODE`/`ABOLISH_CODE`
-指向他法命中 **0** → **自动 supersedes 放弃**(关闭"待定")。`CASE_PARTY` 空(甲方只灌处罚→法规链,无当事人)。
-未命中锚 3737 中 **3736 是空锚**(I2)——指导 R2 只重试有锚案例。
+**explore3 结论**:版本链三字段**当前数据无可用关系**——`SOURCE_LAW_ID` 全空串(distinct=1)、`NEW_CODE`/
+`ABOLISH_CODE` join 他法命中 **0** → **本轮转换脚本产出的 `supersedes` 为空**;**接缝保留(非放弃契约)**,
+未来数据/关系源确认再填(见 SPEC §3.2 版本链接缝现状,Codex 四轮 S6 修正措辞)。`CASE_PARTY` 空(甲方只灌
+处罚→法规链,无当事人)。未命中锚 3737 中 **3736 是空锚**(I2)——指导 R2/S1 的候选筛选。
 
 **Codex 三轮 6 findings**:
 - **R1 导出仍非原子**:staging 后仍先 rmtree 旧目录再 replace,有窗口。修:**拒绝写入非空目录**(绝不销毁已有批次)
@@ -441,3 +442,19 @@ export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿�
 - **R5 source_created_by 未校验**:`CREATOR_ID`(→VARCHAR(64))改 `_bound`(原漏用 `_s`)。
 - **R6 status_map Ask-first**:decision 方**已批准**(2026-07-15)draft→upcoming + test_run 跳过;SPEC §4 记批准。
 - **验证**:全仓 ruff 绿;1096 collect;export 21 + 触及面 122 passed/4 skipped(真 PG);单 head 0015。
+
+## 2026-07-15(续)Codex 四轮 review 修复(7 条,多为三轮 reconcile 改动的连锁)
+
+- **S1 fuzzy 成功不升级 exact**:对账原 gate `ref_unresolved=True` + 条目 `resolved=False`,漏掉"有锚却被同名旧法规
+  fuzzy 成功命中"的案例(resolved=True)→ 精确法规后到也不升级、长期留错版本。修:**触发按 `match!=exact` 筛**
+  (JSONB `@> [{"match":"fuzzy"}]` 下推,可 GIN 索引),不看 resolved/ref_unresolved。
+- **S3 内部源锚泄漏 query API**:三轮把 `law_content_code` 写进 `cited_regulations` → `structured.py:120` 原样塞进
+  `related_regulations`(契约 `list[str]`)泄漏内部锚。修:**撤回锚标记**,对账改用已有 `match` 字段筛(不落库内部锚)。
+- **S2 对账 broad-except fail-open**:try 连 `_align_violated`(DB/逻辑)一起吞、静默 continue → DB 挂也返 0。
+  修:**只裹 ObjectStore 读+解析**,`_align_violated` 的 DB/逻辑错**向上抛**(不 fail-open);坏 raw 隔离。
+- **S1/R2 有界**:对账**只在本批新增了法规(非 P-CASE)时跑**(没新法规则无案例能新解析);跨批自愈=法规批触发全局扫。
+- **S4 respondent 校验绕过**:`_bound` 先 strip 再校验且丢返回值 → 前导空格名(strip 后短、原值 301)漏过 → S4 DataError。
+  修:按 **persons[0].name 原值长度**校验(不 strip)。
+- **S5 staging 泄漏**:提交阶段(rmdir/os.replace)不在 try 内,replace 失败留残 staging。修:**提交也进 try**,失败清 staging。
+- **S6 版本链契约**:devlog 单方面写"放弃"→ 改**"当前数据无可用关系、`supersedes` 本轮为空、接缝保留"**;SPEC §3.2 加版本链接缝现状(契约不变,范围变更须报备)。
+- **验证**:全仓 ruff 绿;1096 collect;export 24 + cases_ingest(含 fuzzy→exact 升级 + 有界对账)+ 触及面 129 passed/4 skipped(真 PG)。

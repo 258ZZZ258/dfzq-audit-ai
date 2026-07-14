@@ -178,9 +178,9 @@ def test_reconcile_fixes_case_first_ordering(env, monkeypatch):
     assert ref["match"] == "exact" and ref["clause_path_norm"] == "1/21"
 
 
-def test_reconcile_is_global_cross_batch(env, monkeypatch):
-    """F5:reconcile 全局(不限 batch_id)——被引法规晚批/别批到也自愈。
-    以"用无关 batch_id 调 reconcile 仍解析本案"证明其不受 batch_id 约束。"""
+def test_reconcile_bound_to_law_batch_then_global(env, monkeypatch):
+    """对账**只在本批新增法规时跑**(Codex R2);跑时**全局扫案例**(不限 batch_id)→ 解析早批案例。
+    先用"无新法规"的 batch_id 证明跳过,再用本批 id(加了法规)证明全局解析。"""
     from pipeline.meta import case_extract
     from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
 
@@ -196,12 +196,16 @@ def test_reconcile_is_global_cross_batch(env, monkeypatch):
     )
     ext_dvid = next(o.doc_version_id for o in r.outcomes if o.filename == "ext-001")
 
-    _run_case(ctx, case_dvid)  # 案例先跑 → 未解析
+    _run_case(ctx, case_dvid)  # 案例先跑 → fuzzy 未解析
     assert ctx.db.get_case(case_dvid).ref_unresolved is True
-    s3_structure.run(ctx, ext_dvid)  # 法规建块
-    # 用**无关 batch_id** 调对账,仍能解析本案 → 证明全局(跨批)
-    assert reconcile_preseg_case_refs(ctx, "totally-unrelated-batch") == 1
-    assert ctx.db.get_case(case_dvid).ref_unresolved is False
+    s3_structure.run(ctx, ext_dvid)  # 法规建块(ext-001 属 bid)
+    # 无新法规的 batch_id → 对账跳过(不解析)
+    assert reconcile_preseg_case_refs(ctx, "batch-without-any-law") == 0
+    assert ctx.db.get_case(case_dvid).ref_unresolved is True
+    # 本批 id(bid 加了 ext 法规)→ 全局扫案例,解析本案(fuzzy→exact 升级)
+    assert reconcile_preseg_case_refs(ctx, bid) == 1
+    case = ctx.db.get_case(case_dvid)
+    assert case.ref_unresolved is False and case.cited_regulations[0]["match"] == "exact"
 
 
 def test_config_seam_flips_back_to_llm_path(env, monkeypatch):

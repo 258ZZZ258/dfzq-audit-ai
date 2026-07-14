@@ -37,6 +37,8 @@
 
 现 11 列保留,新增列:`source_doc_id`(源系统主键,**幂等键**)、`content_hash`(源内容哈希,幂等键第二分量)、`effective_status`(源效力状态原值,经映射器→version_status,D3)、`issuer_level_src`(法律位阶/效力层级原值)、`tags`、`file_no`(内规文件编号)、`source_created_by`。`supersedes` 列由"关联文件"关系自动生成(替代/废止类;依据/参照类本期不承接,记录)。
 
+> **版本链接缝现状(2026-07-15 达梦真数据探查,接缝保留)**:候选源字段 `SOURCE_LAW_ID`(全为空串)、`NEW_CODE`/`ABOLISH_CODE`(join 到另一 `LAW_BASIC.CODE` 命中 **0**)——**当前数据无可用替代/废止关系,故本轮转换脚本产出的 `supersedes` 列为空**(转换脚本 `export.py` 保留该接缝 `# 待定`,不硬编码放弃)。**契约不变**:`supersedes` 自动生成 + S4 版本链登记机制保留;未来数据若含可解析关系,或甲方确认改用别的关系源,再据实填(属范围变更,须 SPEC/RTM 同步 + 报备)。同 `source_doc_id` 换 hash 的自动 `revise_replace` 版本链不受影响,照常工作。
+
 ### 3.3 块记录(blocks JSONL,每行一块)
 
 ```jsonc
