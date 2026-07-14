@@ -26,7 +26,6 @@ from ulid import ULID
 from common.pg_models import DocVersion
 from pipeline.cli import _drive_batch, _drive_context, _print_status
 from pipeline.config import load_config
-from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
 from pipeline.stages.s0_register import register_preseg_batch
 
 
@@ -52,10 +51,11 @@ def run(
         print(f"  ⚠ {w}")
     steps = _drive_batch(pg, ctx, bid)
     print(f"→ worker 推进 {steps} 步")
-    # 批后对账:法规可能晚于案例建块 → 重解析 anchored 未解析引用(顺序竞态自愈,Codex F7)
-    fixed = reconcile_preseg_case_refs(ctx, bid)
-    if fixed:
-        print(f"→ 案例引用对账修正 {fixed} 例")
+    # 精确桥接在案例 S4(META_REVIEW)当下查 chunks。**同批无需批后对账**:``run_until_idle`` 逐轮
+    # lockstep 推进,同批法规 S3(建 chunk)在案例 S4 之前一轮完成,``resolve_exact`` 直接命中
+    # (转换脚本把法规+案例放同一批,故走此路)。**边缘**:案例在更早批、被引法规在更晚批到,或引用
+    # upcoming 后经 activate 转 effective 的法规 → 该案退 fuzzy(有效兜底);需精确时**重灌该案例**
+    # (revise_replace 重跑 S4,此时法规已在)即升级 exact。见 SPEC-PRESEG §8.3。
     with pg.session() as s:
         docs = list(s.scalars(select(DocVersion).where(DocVersion.batch_id == bid)))
     _print_status(docs)

@@ -458,3 +458,18 @@ export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿�
 - **S5 staging 泄漏**:提交阶段(rmdir/os.replace)不在 try 内,replace 失败留残 staging。修:**提交也进 try**,失败清 staging。
 - **S6 版本链契约**:devlog 单方面写"放弃"→ 改**"当前数据无可用关系、`supersedes` 本轮为空、接缝保留"**;SPEC §3.2 加版本链接缝现状(契约不变,范围变更须报备)。
 - **验证**:全仓 ruff 绿;1096 collect;export 24 + cases_ingest(含 fuzzy→exact 升级 + 有界对账)+ 触及面 129 passed/4 skipped(真 PG)。
+
+## 2026-07-15(三续)Codex 五轮:退掉过度设计的批后对账 + 修 query 契约
+
+Codex 五轮 4 条**全在 reconcile**(批后全局对账连生 4 轮 findings:T1 漏 upcoming→activate、T2 坏 raw 隔离不全、
+T4 全库 N+1、外加 T3 query 契约遗留)。**根因**:`run_until_idle` 逐轮 lockstep 推进——转换脚本把法规+案例放
+**同一批**,同批法规 S3 必在案例 S4 前一轮完成,`resolve_exact` 在 S4 **直接命中**(≈96.7%),**批后全局对账本就
+是多余的过度设计**。故**退掉**而非继续打补丁:
+- **删 `reconcile_preseg_case_refs`**(函数 + preseg_ingest 调用 + 两个 reconcile 测)。
+- preseg_ingest 文档说明顺序要求;SPEC-PRESEG §8.3 记 lockstep + fuzzy 兜底(边缘:跨批晚到/upcoming→activate →
+  退 fuzzy,重灌案例即升级 exact;未来量大再引内部持久重试队列——待办,不入 cited_regulations/不泄漏 API)。
+- 回归测 `test_out_of_order_falls_to_fuzzy_then_upgrades_on_reingest`(乱序→fuzzy;重跑 S4→exact)。
+- **T3 query 契约**:`structured.py` 把 `cited_regulations`(dict 列表)原样塞进 `CaseHit.related_regulations`
+  (契约 `list[str]`)。加 `_related_regs` 投影为"法规名 条款路径"字符串,**不泄漏** resolved/match/law_content_code;
+  跨层测 `test_related_regulations_preseg_dict_projected_to_strings`。**遗留问题(非本轮引入,align_cited 一直产 dict)顺手修**。
+- **验证**:全仓 ruff 绿;1096 collect;触及面 108 passed/4 skipped(真 PG)。cases_ingest 更简(exact@S4 + fuzzy 兜底,无对账层)。

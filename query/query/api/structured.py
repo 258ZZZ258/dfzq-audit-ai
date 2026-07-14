@@ -126,7 +126,7 @@ def _cases(cands, case_rows, norm) -> list[CaseHit]:
             seq=seq, case_id=dvid, doc_version_id=dvid, title=_title(dv),
             regulator=_attr(case, "penalty_org"), penalty_date=_iso(_attr(case, "penalty_date")),
             violation_theme=_attr(case, "violation_category"),   # L2:缺→省略
-            related_regulations=list(_attr(case, "cited_regulations") or []),  # L2:缺→省略
+            related_regulations=_related_regs(_attr(case, "cited_regulations")),  # dict→str 投影
             # core_issue/insight(⚠-model):LLM 关 → None(省略)
         ))
     return out
@@ -223,3 +223,26 @@ def _attr(obj, name):
 
 def _title(dv) -> str:
     return _attr(dv, "title") or ""
+
+
+def _related_regs(cited) -> list[str]:
+    """``cases.cited_regulations``(dict 列表)→ ``list[str]``(契约 CaseHit.related_regulations)。
+
+    每条投影为"法规名(或文号) 条款路径"显示串;**只出契约字符串**,不泄漏内部字段
+    (resolved/match/law_content_code 等,SPEC-API §4.4)。非 dict 直接 str;去重保序。
+    """
+    out: list[str] = []
+    for e in cited or []:
+        if isinstance(e, dict):
+            ident = e.get("title") or e.get("doc_no")
+            if not ident:
+                continue
+            clause = e.get("clause_path_norm")
+            s = f"{ident} {clause}" if clause else str(ident)
+        elif e:
+            s = str(e)
+        else:
+            continue
+        if s not in out:
+            out.append(s)
+    return out

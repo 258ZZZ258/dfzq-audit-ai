@@ -115,6 +115,8 @@
 1. fixtures 样例批次(内规+外规+案例各若干,含:插入条/款级引用/推导失败块/未知效力状态/多涉案人员)端到端 `REGISTERED→INDEXED`,`demo status` 全绿。
 2. 同批次幂等重跑:chunk/case 零重复(source_doc_id+content_hash 幂等)。
 3. **桥接点亮**:直装案例后,`bridge.cases_for_clauses` 精确反查命中 + R5 `resolve_cited_clauses` 桥接通道集成测通过(现空转→有数据)。
+
+> **§8.3 精确桥接的顺序要求(2026-07-15 定;替代已删的批后全局对账)**:案例结构化直装在 S4(META_REVIEW)当下用 `CASE_PUNISH.LAW_CONTENT_CODE` 精确查 `chunks.source_code`(限 effective P-EXT)。`run_until_idle` **逐轮 lockstep 推进**——转换脚本把法规+案例放**同一批**,同批法规 S3(建 chunk)必在案例 S4 前一轮完成,故 `resolve_exact` 在 S4 直接命中(≈96.7%,真数据 C1)。**不再做批后全局对账**(过度设计:global N+1、漏 upcoming→activate、每轮生 review findings)。**边缘退化(有效兜底,非降级红线)**:①案例在更早批入库、被引法规在更晚批到;②案例引用 `upcoming` 法规,后经 `activate` 转 `effective` —— 这两类当下 `resolve_exact` 查不到 → 该案退 **fuzzy 标题对齐**(仍可命中,只是非精确)。需精确时**重灌该案例**(revise_replace 重跑 S4,此时法规已 effective+建块)即升级 exact。若未来边缘量大,再引**内部持久重试队列**(按 newly-effective source_code 定向消费,不入 `cited_regulations`/不泄漏 API)—— 记为待办,非本轮契约。
 4. 效力状态映射:四态直落 + 未知值进 meta_confirm 队列,单测覆盖映射表全部枚举。
 5. 推导器 golden 集(仿条款树 golden 先例):条款标识样例→norm,P=R=1.0;失败样例正确落伪路径+标记。
 6. 配置缝回归:indicators 改读 yaml 后,四个既有 profile 的 QC 行为与改造前逐指标一致(对拍测试)。

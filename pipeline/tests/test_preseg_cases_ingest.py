@@ -142,50 +142,14 @@ def test_case_chunks_from_record_fidelity(ingested):
     assert all(c.clause_path_norm.startswith("case/") for c in chunks)  # 反查伪路径约定
 
 
-def test_reconcile_fixes_case_first_ordering(env, monkeypatch):
-    """F7:案例先于被引法规建块 → 精确锚当场查不到 → ref_unresolved;批后对账重解析 → 精确命中。
-
-    复现驱动顺序竞态:不预跑 ext S3,先把案例推到 S4(此时锚查空)→ 再建法规块 →
-    reconcile_preseg_case_refs 自愈。"""
+def test_out_of_order_falls_to_fuzzy_then_upgrades_on_reingest(env, monkeypatch):
+    """乱序(案例先于被引法规建块)→ **fuzzy 兜底**(有效降级,非崩);法规建块后**重跑案例 S4**
+    (≈重灌 revise_replace)→ 升级 exact。正常路径(同批 lockstep:法规 S3 早于案例 S4)由
+    ``test_structured_ingest_aligns_and_lands`` 覆盖,无需批后全局对账。"""
     from pipeline.meta import case_extract
-    from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
 
     ctx, batches = env
-    bid = "preseg-t9-reconcile"
-    batches.append(bid)
-    r = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
-
-    def _boom(*a, **k):  # noqa: ANN002, ANN003
-        raise AssertionError("结构化直装不得触达 LLM/L1")
-
-    monkeypatch.setattr(case_extract, "extract_case", _boom)
-
-    case_dvid = next(
-        o.doc_version_id for o in r.outcomes
-        if o.filename == "某证券营业部员工微信二维码违规招揽客户案"
-    )
-    ext_dvid = next(o.doc_version_id for o in r.outcomes if o.filename == "ext-001")
-
-    _run_case(ctx, case_dvid)  # 案例先跑(法规未建块)
-    assert ctx.db.get_case(case_dvid).ref_unresolved is True  # 锚查空 + fuzzy 无块 → 未解析
-
-    s3_structure.run(ctx, ext_dvid)  # 法规现在建块(effective P-EXT)
-    assert reconcile_preseg_case_refs(ctx, bid) == 1  # 对账修 1 例
-
-    case = ctx.db.get_case(case_dvid)
-    assert case.ref_unresolved is False
-    (ref,) = case.cited_regulations
-    assert ref["match"] == "exact" and ref["clause_path_norm"] == "1/21"
-
-
-def test_reconcile_bound_to_law_batch_then_global(env, monkeypatch):
-    """对账**只在本批新增法规时跑**(Codex R2);跑时**全局扫案例**(不限 batch_id)→ 解析早批案例。
-    先用"无新法规"的 batch_id 证明跳过,再用本批 id(加了法规)证明全局解析。"""
-    from pipeline.meta import case_extract
-    from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
-
-    ctx, batches = env
-    bid = "preseg-t9-xbatch"
+    bid = "preseg-t9-order"
     batches.append(bid)
     r = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
     monkeypatch.setattr(case_extract, "extract_case",
@@ -196,16 +160,15 @@ def test_reconcile_bound_to_law_batch_then_global(env, monkeypatch):
     )
     ext_dvid = next(o.doc_version_id for o in r.outcomes if o.filename == "ext-001")
 
-    _run_case(ctx, case_dvid)  # 案例先跑 → fuzzy 未解析
+    _run_case(ctx, case_dvid)  # 案例先跑(法规未建块)→ fuzzy 兜底
     assert ctx.db.get_case(case_dvid).ref_unresolved is True
-    s3_structure.run(ctx, ext_dvid)  # 法规建块(ext-001 属 bid)
-    # 无新法规的 batch_id → 对账跳过(不解析)
-    assert reconcile_preseg_case_refs(ctx, "batch-without-any-law") == 0
-    assert ctx.db.get_case(case_dvid).ref_unresolved is True
-    # 本批 id(bid 加了 ext 法规)→ 全局扫案例,解析本案(fuzzy→exact 升级)
-    assert reconcile_preseg_case_refs(ctx, bid) == 1
+
+    s3_structure.run(ctx, ext_dvid)  # 法规建块(effective P-EXT)
+    _run_case(ctx, case_dvid)  # 重跑案例 S4(重灌语义)→ 精确命中
     case = ctx.db.get_case(case_dvid)
-    assert case.ref_unresolved is False and case.cited_regulations[0]["match"] == "exact"
+    assert case.ref_unresolved is False
+    assert case.cited_regulations[0]["match"] == "exact"
+    assert case.cited_regulations[0]["clause_path_norm"] == "1/21"
 
 
 def test_config_seam_flips_back_to_llm_path(env, monkeypatch):
