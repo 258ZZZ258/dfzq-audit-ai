@@ -128,13 +128,17 @@ def use_structured_case(dv, profiles: dict) -> bool:
 
 
 def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
-    """批后对账:重解析本批 preseg 案例中 ``ref_unresolved`` 的引用(顺序竞态自愈)。
+    """批后对账:重解析 preseg 案例中 ``ref_unresolved`` 的引用(顺序/跨批竞态自愈)。
 
-    精确桥接在案例 S4 当下查 chunks——若同批被引法规此刻尚未跑到 S3,``resolve_exact`` 返 None
-    → 当场固化 fuzzy/unresolved,无重试。``_drive_batch`` 的 worker 引擎不保证"法规先于案例"顺序
-    (Codex)。故整批推进后重跑一次 ``_align_violated``:此时法规已建块,anchored 引用即精确命中。
+    精确桥接在案例 S4 当下查 chunks——若被引法规此刻尚未建块,``resolve_exact`` 返 None → 当场
+    固化 fuzzy/unresolved,无重试。竞态有两种:①同批 ``_drive_batch`` worker 引擎不保证"法规先于
+    案例"顺序;②**跨批**——案例在早批入库、被引法规在本批才到(Codex 二轮 F5)。故整批推进后
+    **全局**重跑 ``_align_violated``(不限 batch_id),此时法规已建块 → anchored 引用精确命中。
     仅改 ``cited_regulations``/``ref_unresolved`` 两列(定点 update,不经 merge 覆盖其余列)。
-    返回更新的案例数。跨批同理——被引法规在更早批次也能补上。
+    ``batch_id`` 仅作日志范围标识。返回更新的案例数。
+
+    ⚠ 现按"全表扫 ref_unresolved 的 preseg 案例"实现(全库自愈,正确性优先);规模上来后可优化为
+    "仅重算引用了本批新增 source_code 的案例"(demo/中等规模可接受,记待办)。
     """
     from sqlalchemy import select
 
@@ -149,8 +153,7 @@ def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
                 .join(Document, DocVersion.logical_id == Document.logical_id)
                 .join(Case, Case.doc_version_id == DocVersion.doc_version_id)
                 .where(
-                    DocVersion.batch_id == batch_id,
-                    DocVersion.source_format == "preseg",
+                    DocVersion.source_format == "preseg",  # 全局(跨批):不限 batch_id
                     Document.corpus_type == "P-CASE",
                     Case.ref_unresolved.is_(True),  # 仅重试仍有未解析引用者
                 )

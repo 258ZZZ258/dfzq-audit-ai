@@ -165,17 +165,29 @@ def test_date_normalization():
     assert export._date(None) is None
 
 
-def test_fit_truncates_descriptive_with_audit():
-    warns: list[str] = []
-    long = "甲" * 600
-    assert len(export._fit(long, "title", warns)) == 512  # 截断到列宽
-    assert warns and "title" in warns[0]
-
-
-def test_key_over_width_rejected():
+def test_bound_rejects_over_width_not_truncate():
     import pytest
+
+    # 落 PG 定长列超宽 → 拒收(不截断法律元数据;Codex 二轮 F2/F3)
+    assert export._bound("甲" * 500, "title") == "甲" * 500  # 512 内正常
     with pytest.raises(export.PresegExportError):
-        export._key("x" * 300, "CODE")  # 键超 256 → 拒收(不截断破坏幂等)
+        export._bound("甲" * 600, "title")  # 超 512 → 拒收
+    with pytest.raises(export.PresegExportError):
+        export._bound("x" * 300, "source_code")  # 键超 256 → 拒收
+
+
+def test_over_width_field_skips_record_with_audit(tmp_path):
+    # 法规 issuer 超 128 → 整件拒收(skipped 记审计),不截断不 DataError
+    class OverSource(FakeSource):
+        def iter_laws(self):
+            laws = super().iter_laws()
+            laws[0]["ISSUE_AUTH_CN"] = "机" * 200  # issuer 列宽 128
+            return laws
+
+    stats = export.build_batch(OverSource(), tmp_path)
+    assert any("issuer" in s for s in stats["skipped"])  # 审计留痕
+    _, rows = _manifest_rows(tmp_path)
+    assert "L-1" not in {r["source_doc_id"] for r in rows}  # 该件未入
 
 
 def test_safe_filename_injective():
@@ -216,3 +228,35 @@ def test_duplicate_code_rows_deduped(tmp_path):
     blocks = read_blocks(next((tmp_path / "blocks").glob("L-1-*.jsonl")))
     codes = [b.source_code for b in blocks if b.source_code]
     assert codes.count("LC-021") == 1  # 同 CODE 去重,不产双 block
+
+
+def test_duplicate_code_content_conflict_warns(tmp_path):
+    # 同 CODE 但内容不一致(异常/未来数据)→ 告警留痕(不静默丢失冲突;Codex 二轮 F8)
+    class ConflictSource(FakeSource):
+        def contents_for(self, law_code):
+            base = super().contents_for(law_code)
+            if law_code == "L-1":
+                dup = dict(base[1])
+                dup["CONTENT"] = "同 CODE 却不同的正文!"
+                return base + [dup]
+            return base
+
+    stats = export.build_batch(ConflictSource(), tmp_path)
+    assert any("内容冲突" in w for w in stats["warnings"])
+
+
+def test_source_failure_preserves_existing_batch(tmp_path):
+    import pytest
+
+    out = tmp_path / "batch"
+    export.build_batch(FakeSource(), out)
+    old_manifest = (out / "manifest.xlsx").read_bytes()
+
+    class BoomSource(FakeSource):
+        def iter_laws(self):
+            raise RuntimeError("源读取失败")
+
+    with pytest.raises(RuntimeError):
+        export.build_batch(BoomSource(), out)
+    # 原子替换:staging 构建失败绝不销毁已有有效批次(Codex 二轮 F4)
+    assert (out / "manifest.xlsx").read_bytes() == old_manifest

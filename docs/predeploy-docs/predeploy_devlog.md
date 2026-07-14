@@ -403,3 +403,24 @@ export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿�
 **查询侧跟进(记待办)**:真适用对象词表=通用/证券/基金/期货/其他金融机构… 与 demo `dict_entity_types`(证券公司/证券从业人员)
 粒度不同 → D7 过滤要对得上须换 query 侧词表。**验证**:全仓 ruff 绿;export 13(含 SCOPE/日期/去重/适用对象/status_map)+
 触及面 117 passed/4 skipped(真 PG)。
+
+## 2026-07-14(四续)Codex 二轮 review 修复(8 findings,含 1 critical)
+
+前一轮真数据 seam 锁定后 Codex 二轮复审,8 条逐项处置:
+
+- **[critical] 0016 alter_column 破 add-only**:改 3 个既有列类型违反 schema add-only 硬契约,downgrade 收窄丢数据。
+  修:**删 0016**,把 source_code/source_law_id 宽度(256)**折叠进 0015 的 add_column**(新列,一步到位);
+  `source_doc_id` **不动**(0013 已并 main;真实 code ~39 字符 << 64,足够)。栈已 downgrade 0014→re-upgrade,单 head 0015。
+- **[warn] 描述列截断丢法律元数据(F2)+ 案例字段无校验(F3)**:`_fit` 截断改 **`_bound` 超列宽即拒收**
+  (PresegExportError→skip 该件+审计,不截断/不 DataError);覆盖法规(title/doc_number/issuer/…)+ 案例
+  (source_case_id/doc_number/issuing_org/case_type/source_url)全部落 PG 定长列。
+- **[warn] 导出非原子(F4)**:`_clean_out_dir` 先删后建,源读取失败会销毁有效批次。修:**staging 临时目录完整
+  构建 + 成功后 `os.replace` 原子换入**;异常清 staging、out_dir 原样。
+- **[warn] 对账仅本批(F5)**:reconcile 只扫 `batch_id` → 跨批晚到法规不补早批案例。修:**去 batch_id 过滤,
+  全局扫 ref_unresolved preseg 案例**(规模优化记待办)。回归测 `test_reconcile_is_global_cross_batch`。
+- **[warn] 快照 fail-open(F6)**:isolation 设置失败被吞→弱隔离出不一致快照。修:**去 try/except,设置失败即中止**(fail-closed)。
+- **[warn] 去重不验内容(F8)**:仅按 CODE 丢第二行,不比内容、无 ORDER BY。修:去重时 **比对 `_content_sig`
+  (TITLE/CONTENT/IS_CATALOG/INDEX_NO),冲突告警留痕**;DmSource contents 查询加 `ORDER BY INDEX_NO,CODE,ID` 保确定性。
+- **[warn] status_map SPEC 漂移(F7)**:SPEC 仍是旧草案。修:**SPEC-PRESEG §4 更新真值域表**(英文码 + draft=征求意见稿→
+  upcoming + test_run 排除)+ Ask-first 留痕(待报备甲方)。
+- **验证**:全仓 ruff 绿;1094 collect 0 error;export 19 + 触及面 124 passed/4 skipped(真 PG);单 head 0015。

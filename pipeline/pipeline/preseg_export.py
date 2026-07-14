@@ -60,8 +60,10 @@ class DmSource(Source):
         return self._rows(f"SELECT {_LAW_COLS} FROM ZNFG_IAM_LAW_BASIC WHERE {_ALIVE}")
 
     def contents_for(self, law_code: str) -> list[dict]:
+        # ORDER BY 让每节点 2 物理行的去重"保留首见"确定(同 CODE 取最小 ID;Codex 二轮 F8)
         return self._rows(
-            f"SELECT {_CONTENT_COLS} FROM ZNFG_IAM_LAW_CONTENT WHERE LAW_CODE = :c AND {_ALIVE}",
+            f"SELECT {_CONTENT_COLS} FROM ZNFG_IAM_LAW_CONTENT WHERE LAW_CODE = :c AND {_ALIVE} "
+            "ORDER BY INDEX_NO, CODE, ID",
             c=law_code,
         )
 
@@ -90,13 +92,10 @@ def run(out_dir: Path) -> int:
     from sqlalchemy import create_engine
 
     engine = create_engine(dsn)
-    # 单连接单事务 = 一致性快照;尽力设 REPEATABLE READ(驱动不支持则回落默认,记部署注意)
-    conn = engine.connect()
+    # 单连接单事务 = 一致性快照。**必须 REPEATABLE READ**:设置失败即中止(不 fail-open 到弱隔离
+    # 出内部不一致却哈希自洽的"权威快照";Codex 二轮 F6)。驱动不支持 → 报错让运维改配置/换驱动。
+    conn = engine.connect().execution_options(isolation_level="REPEATABLE READ")
     try:
-        try:
-            conn = conn.execution_options(isolation_level="REPEATABLE READ")
-        except Exception:  # noqa: BLE001 - 方言不支持则回落,不阻断导出
-            print("⚠ 驱动不支持显式 REPEATABLE READ,回落默认隔离(部署期核实快照一致性)")
         with conn.begin():
             stats = build_batch(DmSource(conn), out_dir)
     finally:

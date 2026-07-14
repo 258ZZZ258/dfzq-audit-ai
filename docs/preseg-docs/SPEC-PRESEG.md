@@ -74,6 +74,22 @@
 
 **效力状态映射表(草案,实施期据真值域修订)**:现行有效→`effective`;已废止/失效→`abolished`;被替代/已修订→`superseded`(需目标版本,无则 meta_confirm);尚未生效→`upcoming`;**其余未知值→meta_confirm 队列**。冲突规则:源语料源优先并写 `pipeline_events` 留痕;自建语料链推导不动(D3)。
 
+**效力状态映射表(真值域已定,2026-07-14 达梦真数据探查 A2;替代上方草案)** —— `STATUS_CODE` 是**英文码**:
+
+| STATUS_CODE | 计数 | → version_status | 说明 |
+|---|---|---|---|
+| `inuse` | 9,795 | `effective` | 现行有效 |
+| `abolish` | 3,815 | `abolished` | 已废止 |
+| `modified` | 1,291 | `superseded` | 已修订(被新版替代;无目标版本时 meta_confirm) |
+| `pending` | 19 | `upcoming` | 待生效 |
+| `draft` | 382 | `upcoming` | **征求意见稿**(有正文未生效,探查 G8 证实;非入库半成品)——标未生效不污染现行法召回 |
+| `test_run` | 3 | (整件跳过) | 测试数据,转换脚本层 `SKIP_STATUS` 排除,不入库、计入 skipped 审计 |
+| 其余未知值 | — | (保默认 `effective`)+ meta_confirm | 不猜,人工定 |
+
+> **Ask-first 变更留痕(SPEC §7)**:上表新增英文枚举 + `draft→upcoming` + `test_run` 排除,属"效力映射枚举增删",
+> 依据=达梦真数据探查(用户跑 SQL 确认 draft=征求意见稿)。**待正式向甲方报备**(与桥接 fuzzy→精确同批报备)。
+> 中文别名(现行有效/已废止…)保留作历史/自建批次容错。实现:`pipeline/preseg/status_map.py`。
+
 ## 5. Schema 变更清单(add-only,一批 Alembic 迁移)
 
 - `doc_versions` +`source_doc_id`(索引)、`content_hash`、`version_status_source`、`issuer_level_src`、`tags`(JSONB)、`file_no`、`source_created_by`

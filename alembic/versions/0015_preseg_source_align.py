@@ -29,10 +29,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("chunks", sa.Column("source_code", sa.String(length=64), nullable=True))
+    # 列宽直接按真实源(探查:LAW_CONTENT.CODE=VARCHAR(256)、SOURCE_LAW_ID=VARCHAR(256))创建,
+    # add-only 一步到位(不再事后 alter_column,守 schema add-only 硬契约;Codex 二轮 F1)。
+    op.add_column("chunks", sa.Column("source_code", sa.String(length=256), nullable=True))
     op.create_index(op.f("ix_chunks_source_code"), "chunks", ["source_code"], unique=False)
     op.add_column("doc_versions", sa.Column("invalid_date", sa.Date(), nullable=True))
-    op.add_column("doc_versions", sa.Column("source_law_id", sa.String(length=64), nullable=True))
+    op.add_column("doc_versions", sa.Column("source_law_id", sa.String(length=256), nullable=True))
     op.create_index(
         op.f("ix_doc_versions_source_law_id"), "doc_versions", ["source_law_id"], unique=False
     )

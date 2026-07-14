@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
@@ -45,13 +48,18 @@ SKIP_STATUS = frozenset({"test_run"})
 #: 适用对象多值分隔符(真数据 SUIT_OBJ_CODE 见 顿号、竖线 混用,统一拆)
 _SUIT_OBJ_DELIM = re.compile(r"[、,，|/;;]+")
 
-#: PG 描述列宽(截断上限;键列不在此表——键超宽必须拒收而非截断)
+#: 所有落 PG 定长列的宽度(法规 + 案例)。**超界 → 可审计拒收该件,绝不截断法律元数据**
+#: (文号/机关/效力层级/条款锚都是法律身份;截断会污染,DataError 会中断批次;Codex 二轮 F2/F3)。
+#: 真实值远小于列宽(code ~39、文号/机关 ~十几字),拒收几乎不触发;触发即整件拦下人工核。
 _COL_WIDTHS = {
+    # 法规(manifest → doc_versions/chunks)
     "title": 512, "issuer": 128, "doc_number": 128, "sub_type": 32,
-    "issuer_level_src": 64, "file_no": 128, "case_name": 512,
+    "issuer_level_src": 64, "file_no": 128, "source_doc_id": 64,
+    "source_code": 256, "source_law_id": 256,
+    # 案例(cases.jsonl → doc_versions/cases)
+    "case_name": 512, "source_case_id": 64, "case_doc_number": 128,
+    "penalty_org": 256, "case_type": 64, "source_url": 512,
 }
-#: 源键列最大安全宽(迁移 0016 拓宽后):超过即拒收(截断键会破坏幂等/桥接)
-_KEY_MAXLEN = 256
 
 
 def entity_types_of(suit_obj_code: object) -> str | None:
@@ -126,24 +134,19 @@ def _int(v: object, default: int = 0) -> int:
         return default
 
 
-def _fit(value: object, field: str, warnings: list[str]) -> str | None:
-    """描述列按 PG 列宽截断 + 记审计告警(不 DataError 中断批次)。键列不走此路。"""
+def _bound(value: object, field: str) -> str | None:
+    """落 PG 定长列的字段边界:超列宽 → **拒收(PresegExportError,可审计,调用方 skip 该件)**,
+    不截断(法律元数据)、不 DataError(中断批次)。None/空 → None。"""
     s = _s(value)
-    if s is None:
-        return None
-    maxlen = _COL_WIDTHS[field]
-    if len(s) > maxlen:
-        warnings.append(f"{field} 超列宽 {maxlen}(源长 {len(s)})→ 截断:{s[:20]}…")
-        return s[:maxlen]
+    if s is not None and len(s) > _COL_WIDTHS[field]:
+        raise PresegExportError(f"{field} 长度 {len(s)} 超 PG 列宽 {_COL_WIDTHS[field]}:{s[:30]}…")
     return s
 
 
-def _key(value: object, field: str) -> str | None:
-    """源键列:超安全宽 → 拒收(截断键会破坏幂等/桥接);正常返原值。"""
-    s = _s(value)
-    if s is not None and len(s) > _KEY_MAXLEN:
-        raise PresegExportError(f"{field} 长度 {len(s)} 超键列上限 {_KEY_MAXLEN}:{s[:40]}…")
-    return s
+def _content_sig(row: dict) -> tuple:
+    """LAW_CONTENT 行内容指纹(去重冲突比对用):TITLE/CONTENT/IS_CATALOG/INDEX_NO。"""
+    return (_s(row.get("TITLE")), _s(row.get("CONTENT")),
+            _int(row.get("IS_CATALOG")), _int(row.get("INDEX_NO")))
 
 
 def _live(rows: list[dict]) -> list[dict]:
@@ -163,16 +166,21 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
     - 正文取 CONTENT(图片/视频详情本轮跳过);空正文目录节点用 TITLE 兜底成块。
     """
     # 去重:真数据(探查 G1/G2)每节点有 2 物理行(**同 CODE 异 snowflake ID,内容一致**,
-    # 全表 COUNT(DISTINCT CODE)恒=1)→ 按 CODE 保留首见即安全(source_code/文本/norm 都相同,
-    # 桥接不受影响)。无 CODE 行(罕见)不去重,全保留。
+    # 全表 COUNT(DISTINCT CODE)恒=1)→ 按 CODE 保留首见。但**不假设内容必然一致**(Codex 二轮 F8):
+    # 同 CODE 若 TITLE/CONTENT/IS_CATALOG/INDEX_NO 冲突(未来/异常数据),告警留痕再保留首见(确定性
+    # 靠 DmSource 的 ORDER BY CODE,ID),不静默丢失冲突。无 CODE 行(罕见)不去重全保留。
     deduped: list[dict] = []
-    seen_code: set[str] = set()
+    by_code: dict[str, dict] = {}
     for c in _live(contents):
         code = _s(c.get("CODE"))
-        if code and code in seen_code:
+        if not code:
+            deduped.append(c)
             continue
-        if code:
-            seen_code.add(code)
+        if code in by_code:
+            if _content_sig(c) != _content_sig(by_code[code]):
+                warnings.append(f"同 CODE={code} 重复行内容冲突,保留首见")
+            continue
+        by_code[code] = c
         deduped.append(c)
     ordered = sorted(deduped, key=lambda r: (_int(r.get("INDEX_NO")), str(r.get("CODE") or "")))
     out: list[dict] = []
@@ -186,8 +194,8 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
         if title:
             rec["clause_label"] = title
         sc = _s(c.get("CODE"))
-        if sc and len(sc) > _KEY_MAXLEN:  # 锚超宽 → 弃锚(回落 fuzzy),不崩
-            warnings.append(f"LAW_CONTENT.CODE 超 {_KEY_MAXLEN} 弃锚:{sc[:40]}…")
+        if sc and len(sc) > _COL_WIDTHS["source_code"]:  # 锚超列宽 → 弃锚(回落 fuzzy),不崩
+            warnings.append(f"LAW_CONTENT.CODE 超 {_COL_WIDTHS['source_code']} 弃锚:{sc[:40]}…")
             sc = None
         if sc:
             rec["source_code"] = sc
@@ -232,19 +240,29 @@ def _violated(punish: dict) -> dict:
     return v
 
 
-def case_record(case: dict, parties: list[dict], punishes: list[dict], warnings: list[str]) -> dict:
-    """CASE_BASIC + PARTY + PUNISH → cases.jsonl 记录(reader.PresegCase 契约)。"""
+def case_record(case: dict, parties: list[dict], punishes: list[dict]) -> dict:
+    """CASE_BASIC + PARTY + PUNISH → cases.jsonl 记录(reader.PresegCase 契约)。
+
+    落 PG 定长列的字段(source_case_id/doc_number/issuing_org/case_type/source_url)经 ``_bound``
+    边界校验:超列宽 → 拒收该案(Codex 二轮 F3);problem_summary/description 是 chunk 文本,不限长。
+    """
     persons = [_person(p) for p in sorted(_live(parties), key=lambda r: _int(r.get("PARTY_INDEX")))]
     vregs = [
         _violated(p) for p in sorted(_live(punishes), key=lambda r: _int(r.get("PUNISH_INDEX")))
     ]
-    rec: dict = {"case_name": _fit(case.get("NAME"), "case_name", warnings) or "(未命名案件)",
+    rec: dict = {"case_name": _bound(case.get("NAME"), "case_name") or "(未命名案件)",
                  "persons": persons, "violated_regulations": vregs}
-    if code := _s(case.get("CODE")):
-        rec["source_case_id"] = code
-    for src, dst in (("DOC_NO", "doc_number"), ("PUB_AUTH_CN", "issuing_org"),
-                     ("DOC_TYPE", "case_type"), ("SUMMARY", "problem_summary"),
-                     ("CASE_DESC", "description"), ("URL", "source_url")):
+    # 落 PG 定长列 → _bound 拒收超宽;(源列, cases.jsonl 键, _COL_WIDTHS 键)
+    for src, dst, wkey in (
+        ("CODE", "source_case_id", "source_case_id"),
+        ("DOC_NO", "doc_number", "case_doc_number"),
+        ("PUB_AUTH_CN", "issuing_org", "penalty_org"),
+        ("DOC_TYPE", "case_type", "case_type"),
+        ("URL", "source_url", "source_url"),
+    ):
+        if val := _bound(case.get(src), wkey):
+            rec[dst] = val
+    for src, dst in (("SUMMARY", "problem_summary"), ("CASE_DESC", "description")):  # chunk 文本
         if val := _s(case.get(src)):
             rec[dst] = val
     if d := _date(case.get("PUB_DATE")):
@@ -256,8 +274,9 @@ def case_record(case: dict, parties: list[dict], punishes: list[dict], warnings:
     return rec
 
 
-def manifest_row(law: dict, blocks: list[dict], filename: str, warnings: list[str]) -> dict:
-    """LAW_BASIC + 其 blocks → manifest 行(21 列全集)。分类走 SCOPE(fail-closed);列宽保真。
+def manifest_row(law: dict, blocks: list[dict], filename: str) -> dict:
+    """LAW_BASIC + 其 blocks → manifest 行(21 列全集)。分类走 SCOPE(fail-closed);
+    落 PG 定长列经 ``_bound`` 超宽即拒收(不截断法律元数据;Codex 二轮 F2)。
 
     content_hash = 本次 blocks 语义规范化指纹(声明==实际;S0 交叉核验恒真,源内容变即指纹变)。
     """
@@ -271,22 +290,22 @@ def manifest_row(law: dict, blocks: list[dict], filename: str, warnings: list[st
     parsed = parse_blocks("\n".join(json.dumps(b, ensure_ascii=False) for b in blocks), filename)
     row.update(
         filename=filename,
-        title=_fit(law.get("NAME"), "title", warnings),
-        doc_number=_fit(law.get("DOC_NO"), "doc_number", warnings),
-        issuer=_fit(law.get("ISSUE_AUTH_CN"), "issuer", warnings),
+        title=_bound(law.get("NAME"), "title"),
+        doc_number=_bound(law.get("DOC_NO"), "doc_number"),
+        issuer=_bound(law.get("ISSUE_AUTH_CN"), "issuer"),
         perm_tag=perm,
         corpus_type=corpus,
-        sub_type=_fit(law.get("LEVELS"), "sub_type", warnings),
+        sub_type=_bound(law.get("LEVELS"), "sub_type"),
         issue_date=_date(law.get("ISSUE_DATE")),
         effective_date=_date(law.get("EFFECT_DATE")),
         invalid_date=_date(law.get("INVALID_DATE")),
-        source_doc_id=_key(law.get("CODE"), "CODE"),  # 逻辑键(跨版本稳)
+        source_doc_id=_bound(law.get("CODE"), "source_doc_id"),  # 逻辑键(跨版本稳)
         content_hash=blocks_content_hash(parsed),
         effective_status=effective_status_of(law.get("STATUS_CODE")),
-        issuer_level_src=_fit(law.get("LEVELS"), "issuer_level_src", warnings),
+        issuer_level_src=_bound(law.get("LEVELS"), "issuer_level_src"),
         tags=_s(law.get("TAG")),
-        file_no=_fit(law.get("DOC_NO"), "file_no", warnings),
-        source_law_id=_key(law.get("SOURCE_LAW_ID"), "SOURCE_LAW_ID"),
+        file_no=_bound(law.get("DOC_NO"), "file_no"),
+        source_law_id=_bound(law.get("SOURCE_LAW_ID"), "source_law_id"),
         entity_types=entity_types_of(law.get("SUIT_OBJ_CODE")),  # 适用对象(D7,写投影)
         source_created_by=_s(law.get("CREATOR_ID")),  # 源创建人(provenance)
     )
@@ -304,23 +323,30 @@ def _safe_filename(law_code: str) -> str:
 # ── 编排 + 落盘 ──────────────────────────────────────────────────────────────
 
 
-def _clean_out_dir(out_dir: Path) -> None:
-    """复用目录:清陈旧产物(blocks/*.jsonl + cases.jsonl + manifest.xlsx),避免旧案例/旧法规
-    被再次摄取(Codex:空 cases 时旧 cases.jsonl 会残留)。"""
-    (out_dir / "blocks").mkdir(parents=True, exist_ok=True)
-    for p in (out_dir / "blocks").glob("*.jsonl"):
-        p.unlink()
-    for name in ("cases.jsonl", "manifest.xlsx"):
-        f = out_dir / name
-        if f.exists():
-            f.unlink()
-
-
 def build_batch(source: Source, out_dir: Path) -> dict:
-    """8 表 → 批次目录。返回统计(含 skipped/warnings)。**只写目录,不入库**。"""
-    out_dir = Path(out_dir)
-    _clean_out_dir(out_dir)
+    """8 表 → 批次目录。返回统计(含 skipped/warnings)。**只写目录,不入库**。
 
+    **原子替换**(Codex 二轮 F4):先在同父目录的 staging 临时目录完整构建(源读取/落盘都在此),
+    成功后才 rmtree 旧目录 + ``os.replace`` 原子换入——**源读取中途异常绝不销毁已有有效批次**,
+    也不留半批产物(异常时清 staging,out_dir 原样)。"""
+    out_dir = Path(out_dir)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=out_dir.parent, prefix=f".{out_dir.name}.staging-"))
+    try:
+        stats = _build_into(source, staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    if out_dir.exists():  # 仅在 staging 构建成功后才动 out_dir
+        shutil.rmtree(out_dir)
+    os.replace(staging, out_dir)  # 同文件系统原子 rename
+    stats["out_dir"] = str(out_dir)
+    return stats
+
+
+def _build_into(source: Source, work: Path) -> dict:
+    """把 8 表转换产物写入(空的)work 目录。仅由 build_batch 在 staging 上调用。"""
+    (work / "blocks").mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     warnings: list[str] = []
     skipped: list[str] = []
@@ -346,30 +372,33 @@ def build_batch(source: Source, out_dir: Path) -> dict:
             if fn in seen_files:  # 哈希后缀后仍撞(极罕见)→ 拒收该件不覆盖
                 skipped.append(f"文件名碰撞 CODE={code}")
                 continue
-            row = manifest_row(law, blocks, fn, warnings)
-        except PresegExportError as e:  # fail-closed(SCOPE 不可判 / 键超宽)→ 拒收该件 + 审计
+            row = manifest_row(law, blocks, fn)
+        except PresegExportError as e:  # fail-closed(SCOPE 不可判 / 字段超列宽)→ 拒收该件 + 审计
             skipped.append(str(e))
             continue
         seen_keys.add(code)
         seen_files.add(fn)
-        (out_dir / "blocks" / f"{fn}.jsonl").write_text(
+        (work / "blocks" / f"{fn}.jsonl").write_text(
             "\n".join(json.dumps(b, ensure_ascii=False) for b in blocks) + "\n", encoding="utf-8"
         )
         rows.append(row)
 
     cases = []
     for c in _live(source.iter_cases()):
-        code = _s(c.get("CODE"))
-        if not code:
+        if not _s(c.get("CODE")):
             continue
-        cases.append(case_record(c, source.parties_for(code), source.punishes_for(code), warnings))
-    if cases:  # 无案例则不写(_clean_out_dir 已删旧件,避免旧案例再摄取)
-        (out_dir / "cases.jsonl").write_text(
+        code = _s(c.get("CODE"))
+        try:
+            cases.append(case_record(c, source.parties_for(code), source.punishes_for(code)))
+        except PresegExportError as e:  # 案例字段超列宽 → 拒收该案 + 审计(F3)
+            skipped.append(str(e))
+    if cases:  # 无案例则不写(staging 全新,不会残留旧 cases.jsonl)
+        (work / "cases.jsonl").write_text(
             "\n".join(json.dumps(c, ensure_ascii=False) for c in cases) + "\n", encoding="utf-8"
         )
-    _write_manifest(out_dir / "manifest.xlsx", rows)
+    _write_manifest(work / "manifest.xlsx", rows)
     return {"laws": len(rows), "cases": len(cases), "skipped": skipped,
-            "warnings": warnings, "out_dir": str(out_dir)}
+            "warnings": warnings, "out_dir": str(work)}
 
 
 def _write_manifest(path: Path, rows: list[dict]) -> None:
