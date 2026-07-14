@@ -41,6 +41,8 @@ class _FakePg:
 
 def _patch_context(monkeypatch):
     monkeypatch.setattr(pi, "_drive_context", lambda cfg: (_FakePg(), object()))
+    # 批末对账是独立集成关注点(见 test_preseg_cases_ingest);接线单元 no-op 掉
+    monkeypatch.setattr(pi, "reconcile_preseg_case_refs", lambda ctx, bid: 0)
 
 
 def test_run_wires_register_then_drive_same_batch_id(monkeypatch):

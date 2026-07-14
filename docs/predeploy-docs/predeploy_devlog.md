@@ -473,3 +473,15 @@ T4 全库 N+1、外加 T3 query 契约遗留)。**根因**:`run_until_idle` 逐�
   (契约 `list[str]`)。加 `_related_regs` 投影为"法规名 条款路径"字符串,**不泄漏** resolved/match/law_content_code;
   跨层测 `test_related_regulations_preseg_dict_projected_to_strings`。**遗留问题(非本轮引入,align_cited 一直产 dict)顺手修**。
 - **验证**:全仓 ruff 绿;1096 collect;触及面 108 passed/4 skipped(真 PG)。cases_ingest 更简(exact@S4 + fuzzy 兜底,无对账层)。
+
+## 2026-07-15(四续)Codex 六轮:五轮"退对账"依据的前提是假的 → 收窄成批内对账 + 纠正恢复口径
+
+Codex 六轮 2 条 warning **都指向五轮那次退对账引入的裂缝**——**根因是五轮的前提被证伪**:
+- **F1「lockstep 顺序保证不存在」**:核到代码——`_structuring` 在**同一步内**跑 S3(建 chunk)+ S4(案例桥接),法规与案例**同轮**进 STRUCTURING;`docs_in_states` **无 `ORDER BY`**,轮内处理顺序由 DB 堆扫描决定。故"同批法规 S3 必在案例 S4 前一轮完成"**不成立**(S3/S4 同轮同步,≈96.7% 只是当前 ctid 堆序的经验产物)。同轮内案例 S4 抢先 → fuzzy,**删对账后无自愈**。
+- **F2「恢复动作是假的」**:文档写"重灌案例升级 exact",但 `find_existing_case_doc` 只按 `content_hash(+source_case_id)` 判重 → 同内容重灌 = **DUPLICATE no-op**,不建版本、不重跑 S4。五轮的回归测 `_run_case` 直接对同 dvid 重调 stage、**绕过 S0 幂等** = 假绿。
+
+**决策(用户选)**:F1 用**批内作用域对账**(非原样恢复全局对账);F2 恢复动作改成**真实命令 `reprocess`**。
+- **重加 `reconcile_preseg_case_refs`,但收窄为批内**:`WHERE batch_id==bid`,只重解析**本批** fuzzy 案例;去掉五轮 findings 缠斗的全局层(added_law 门 / 全库 @> 扫描 / upcoming→activate 跨批门)。O(本批案例),**确定性自愈同批竞态、与扫描顺序无关**。preseg_ingest 在 `_drive_batch` 后自动调。跨批/upcoming 边缘仍退 fuzzy 兜底(honest 保留)。
+- **恢复口径纠正**:SPEC §8.3 + preseg_ingest 注释删"重灌即升级"假描述,改**`reprocess <case_dvid>`**(重置 REGISTERED→复用同 dvid 重跑 S3/S4);明确重灌=DUPLICATE no-op、不是恢复动作。
+- **测试改真**:①`test_same_batch_race_healed_by_batch_reconcile`(fuzzy→批内对账→exact,+ 批内作用域:别的 batch_id 不动本案);②`test_reingest_same_case_is_duplicate_noop_not_recovery`(证 F2:重灌=DUPLICATE、复用原 dvid);③模型门 e2e `test_preseg_case_reprocess_recovers_bridge`(公开 reprocess 入口重处理虚拟案例→重回 INDEXED+exact,验 F2 真实恢复)。
+- **验证**:全仓 ruff 绿;触及面 PG-only 14 passed(真 PG);e2e reprocess 测为模型门(本会话 BGE 未起 → skip,correct-by-construction)。

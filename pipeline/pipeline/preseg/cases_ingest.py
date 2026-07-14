@@ -127,6 +127,62 @@ def use_structured_case(dv, profiles: dict) -> bool:
     )
 
 
+def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
+    """批末对账:重解析**本批**任何非 exact 引用的 preseg 案例(同批竞态确定性自愈)。
+
+    精确桥接在案例 S4 当下查 chunks,但 ``_structuring`` 在**同一步**内跑 S3(建 chunk)+ S4,
+    且 ``run_until_idle``/``docs_in_states`` **不保证同轮内文档处理顺序**(无 ORDER BY,顺序由 DB
+    堆扫描决定)——故同批案例 S4 可能先于被引法规 S3 执行,当场落 fuzzy。批驱动 drain 后本批法规
+    **必已建块**,重解析即升级 exact,**与扫描顺序无关**(替代已删的全局对账)。
+
+    **批内作用域(非全局)**:只扫 ``batch_id`` 本批的 P-CASE。同批(转换脚本把法规+案例放同一批)
+    是本对账唯一负责的场景;**跨批晚到 / upcoming→activate** 退 fuzzy 兜底,精确恢复走
+    ``reprocess <dvid>``(重跑 S4,见 SPEC-PRESEG §8.3),未来量大再引持久重试队列。O(本批案例),
+    无全局 N+1。
+
+    触发按 ``match!=exact``(``cited_regulations @> [{"match":"fuzzy"}]``),**不看 resolved**:有锚却被
+    同名旧法规 fuzzy 命中的案例也要升级。**单条坏/缺失 raw 隔离**(只裹 ObjectStore 读+解析,
+    ``_align_violated`` 的 DB/逻辑错向上抛,不 fail-open)。仅定点改 ``cited_regulations``/
+    ``ref_unresolved`` 两列;写前比对无改善不写。返回更新的案例数。
+    """
+    from common.pg_models import Case
+    from pipeline.meta.reg_lookup import PgRegLookup
+
+    with ctx.db.session() as s:
+        targets = s.execute(
+            select(DocVersion.doc_version_id, DocVersion.raw_object_key)
+            .join(Document, DocVersion.logical_id == Document.logical_id)
+            .join(Case, Case.doc_version_id == DocVersion.doc_version_id)
+            .where(
+                DocVersion.batch_id == batch_id,  # 批内作用域(替全局,无 N+1)
+                DocVersion.source_format == "preseg",
+                Document.corpus_type == "P-CASE",
+                # 含任一 fuzzy 条目(非 exact = 可能可升级);JSONB 下推可 GIN 索引
+                Case.cited_regulations.op("@>")([{"match": "fuzzy"}]),
+            )
+        ).all()
+    if not targets:
+        return 0
+    lookup = PgRegLookup(ctx.db)
+    updated = 0
+    for dvid, raw_key in targets:
+        try:
+            rec = json.loads(ctx.object_store.get(raw_key).decode("utf-8"))
+        except Exception:  # noqa: BLE001 - 坏/缺失 raw 隔离;DB/逻辑错在 _align 外抛
+            continue
+        aligned, unresolved = _align_violated(rec.get("violated_regulations") or [], lookup)
+        with ctx.db.session() as s:
+            case = s.get(Case, dvid)
+            if case is None or (
+                aligned == case.cited_regulations and unresolved == case.ref_unresolved
+            ):
+                continue  # 无改善 → 不写
+            case.cited_regulations = aligned
+            case.ref_unresolved = unresolved
+        updated += 1
+    return updated
+
+
 def _align_violated(vregs: list, lookup) -> tuple[list, bool]:
     """违反法规子表 → cited_regulations(**精确桥接优先,fuzzy 回落**),保序。
 

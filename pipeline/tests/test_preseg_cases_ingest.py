@@ -142,14 +142,16 @@ def test_case_chunks_from_record_fidelity(ingested):
     assert all(c.clause_path_norm.startswith("case/") for c in chunks)  # 反查伪路径约定
 
 
-def test_out_of_order_falls_to_fuzzy_then_upgrades_on_reingest(env, monkeypatch):
-    """乱序(案例先于被引法规建块)→ **fuzzy 兜底**(有效降级,非崩);法规建块后**重跑案例 S4**
-    (≈重灌 revise_replace)→ 升级 exact。正常路径(同批 lockstep:法规 S3 早于案例 S4)由
-    ``test_structured_ingest_aligns_and_lands`` 覆盖,无需批后全局对账。"""
+def test_same_batch_race_healed_by_batch_reconcile(env, monkeypatch):
+    """同批竞态(案例 S4 在被引法规 S3 之前跑——``_structuring`` 同步 s3+s4 且 ``docs_in_states``
+    无序,轮内顺序由 DB 堆扫描决定,**不保证**)→ 当场 fuzzy 兜底(有效降级,非崩)。批末**批内
+    作用域**对账 ``reconcile_preseg_case_refs`` 重解析本批 fuzzy 案例 → 升级 exact,**不依赖扫描
+    顺序**(替代已删的全局对账)。跨批/upcoming 边缘的精确恢复走 ``reprocess``,见 test_preseg_e2e。"""
     from pipeline.meta import case_extract
+    from pipeline.preseg.cases_ingest import reconcile_preseg_case_refs
 
     ctx, batches = env
-    bid = "preseg-t9-order"
+    bid = "preseg-t9-race"
     batches.append(bid)
     r = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
     monkeypatch.setattr(case_extract, "extract_case",
@@ -160,15 +162,37 @@ def test_out_of_order_falls_to_fuzzy_then_upgrades_on_reingest(env, monkeypatch)
     )
     ext_dvid = next(o.doc_version_id for o in r.outcomes if o.filename == "ext-001")
 
-    _run_case(ctx, case_dvid)  # 案例先跑(法规未建块)→ fuzzy 兜底
+    _run_case(ctx, case_dvid)  # 案例先跑(被引法规未建块)→ fuzzy 兜底
     assert ctx.db.get_case(case_dvid).ref_unresolved is True
 
-    s3_structure.run(ctx, ext_dvid)  # 法规建块(effective P-EXT)
-    _run_case(ctx, case_dvid)  # 重跑案例 S4(重灌语义)→ 精确命中
+    s3_structure.run(ctx, ext_dvid)  # 被引法规建块(批驱动 drain 后本批法规必已如此)
+    # 批内作用域:别的 batch_id 不动本案(证明非全局扫描)
+    assert reconcile_preseg_case_refs(ctx, "preseg-t9-other-batch") == 0
+    assert ctx.db.get_case(case_dvid).ref_unresolved is True
+    # 本批对账 → 确定性升级 exact
+    assert reconcile_preseg_case_refs(ctx, bid) == 1
     case = ctx.db.get_case(case_dvid)
     assert case.ref_unresolved is False
     assert case.cited_regulations[0]["match"] == "exact"
     assert case.cited_regulations[0]["clause_path_norm"] == "1/21"
+
+
+def test_reingest_same_case_is_duplicate_noop_not_recovery(env):
+    """恢复口径纠偏:同内容案例"重灌"(再走 S0 ``register_preseg_batch``)= **DUPLICATE no-op**——
+    ``find_existing_case_doc`` 按 content_hash(+source_case_id)判重、复用原 dvid,**不新建版本、
+    不重跑 S4、不升级桥接**。故"重灌即升级 exact"是错的口径(已从文档删除);真实精确恢复动作是
+    ``reprocess <case_dvid>``(重跑 S3/S4,复用同 dvid),见 SPEC-PRESEG §8.3 / test_preseg_e2e。"""
+    ctx, batches = env
+    bid = "preseg-t9-reingest"
+    batches.append(bid)
+    name = "某证券营业部员工微信二维码违规招揽客户案"
+    r1 = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
+    first = next(o for o in r1.outcomes if o.filename == name)
+    # 再次登记同一批(同内容案例)
+    r2 = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
+    dup = next(o for o in r2.outcomes if o.filename == name)
+    assert dup.status == "DUPLICATE"
+    assert dup.doc_version_id == first.doc_version_id  # 复用原 dvid,无新版本
 
 
 def test_config_seam_flips_back_to_llm_path(env, monkeypatch):

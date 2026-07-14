@@ -192,3 +192,19 @@ def test_cold_backup_present_for_rebuild(driven):
             )
         ).all()
     assert chunks and all(c.dense_vec_cold is not None for c in chunks)
+
+
+def test_preseg_case_reprocess_recovers_bridge(driven):
+    """Finding 2 恢复口径:PRESEG 虚拟案例的精确恢复动作 = ``reprocess <case_dvid>``(重置 REGISTERED
+    → 复用同 dvid 重跑 S3/S4 → 重回 INDEXED),**非重灌**(同内容重灌经 S0 幂等 = DUPLICATE no-op,
+    见 test_preseg_cases_ingest)。验证虚拟案例可经公开 reprocess 入口重处理:重回 INDEXED、桥接
+    重解析(法规已建块 → exact)、Milvus 投影重建就位。**放本文件最后**,避免扰动共享 driven
+    (reprocess 幂等回到 INDEXED,chunk_id 确定性不漂移)。"""
+    pg, mio, ctx, report, dvids = driven
+    case_dvid = next(v for k, v in dvids.items() if k and "招揽客户案" in str(k))
+    final = cli.reprocess_to_indexed(pg, ctx, case_dvid, operator="test")
+    assert final == "INDEXED"
+    case = ctx.db.get_case(case_dvid)
+    assert case is not None and case.cited_regulations
+    assert case.cited_regulations[0]["match"] == "exact"  # 法规已建块 → 重跑 S4 精确命中
+    assert mio.count(case_dvid) > 0  # 投影重建就位
