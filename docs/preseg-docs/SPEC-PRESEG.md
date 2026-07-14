@@ -37,6 +37,8 @@
 
 现 11 列保留,新增列:`source_doc_id`(源系统主键,**幂等键**)、`content_hash`(源内容哈希,幂等键第二分量)、`effective_status`(源效力状态原值,经映射器→version_status,D3)、`issuer_level_src`(法律位阶/效力层级原值)、`tags`、`file_no`(内规文件编号)、`source_created_by`。`supersedes` 列由"关联文件"关系自动生成(替代/废止类;依据/参照类本期不承接,记录)。
 
+> **版本链接缝现状(2026-07-15 达梦真数据探查,接缝保留)**:候选源字段 `SOURCE_LAW_ID`(全为空串)、`NEW_CODE`/`ABOLISH_CODE`(join 到另一 `LAW_BASIC.CODE` 命中 **0**)——**当前数据无可用替代/废止关系,故本轮转换脚本产出的 `supersedes` 列为空**(转换脚本 `export.py` 保留该接缝 `# 待定`,不硬编码放弃)。**契约不变**:`supersedes` 自动生成 + S4 版本链登记机制保留;未来数据若含可解析关系,或甲方确认改用别的关系源,再据实填(属范围变更,须 SPEC/RTM 同步 + 报备)。同 `source_doc_id` 换 hash 的自动 `revise_replace` 版本链不受影响,照常工作。
+
 ### 3.3 块记录(blocks JSONL,每行一块)
 
 ```jsonc
@@ -74,6 +76,24 @@
 
 **效力状态映射表(草案,实施期据真值域修订)**:现行有效→`effective`;已废止/失效→`abolished`;被替代/已修订→`superseded`(需目标版本,无则 meta_confirm);尚未生效→`upcoming`;**其余未知值→meta_confirm 队列**。冲突规则:源语料源优先并写 `pipeline_events` 留痕;自建语料链推导不动(D3)。
 
+**效力状态映射表(真值域已定,2026-07-14 达梦真数据探查 A2;替代上方草案)** —— `STATUS_CODE` 是**英文码**:
+
+| STATUS_CODE | 计数 | → version_status | 说明 |
+|---|---|---|---|
+| `inuse` | 9,795 | `effective` | 现行有效 |
+| `abolish` | 3,815 | `abolished` | 已废止 |
+| `modified` | 1,291 | `superseded` | 已修订(被新版替代;无目标版本时 meta_confirm) |
+| `pending` | 19 | `upcoming` | 待生效 |
+| `draft` | 382 | `upcoming` | **征求意见稿**(有正文未生效,探查 G8 证实;非入库半成品)——标未生效不污染现行法召回 |
+| `test_run` | 3 | (整件跳过) | 测试数据,转换脚本层 `SKIP_STATUS` 排除,不入库、计入 skipped 审计 |
+| 其余未知值 | — | (保默认 `effective`)+ meta_confirm | 不猜,人工定 |
+
+> **Ask-first 变更留痕 + 批准(SPEC §7)**:上表新增英文枚举 + `draft→upcoming` + `test_run` 排除,属"效力映射
+> 枚举增删"。依据=达梦真数据探查(SQL 确认 draft=征求意见稿、test_run 仅 3 条测试数据)。
+> **已批准(2026-07-15,决策方拍板)**:draft→upcoming(未生效,可前瞻查询用、不当现行法)、test_run 整件跳过。
+> 中文别名(现行有效/已废止…)保留作历史/自建批次容错。实现:`pipeline/preseg/status_map.py`。
+> (仍与桥接 fuzzy→精确一并向甲方正式报备存档,不阻塞实施。)
+
 ## 5. Schema 变更清单(add-only,一批 Alembic 迁移)
 
 - `doc_versions` +`source_doc_id`(索引)、`content_hash`、`version_status_source`、`issuer_level_src`、`tags`(JSONB)、`file_no`、`source_created_by`
@@ -95,6 +115,8 @@
 1. fixtures 样例批次(内规+外规+案例各若干,含:插入条/款级引用/推导失败块/未知效力状态/多涉案人员)端到端 `REGISTERED→INDEXED`,`demo status` 全绿。
 2. 同批次幂等重跑:chunk/case 零重复(source_doc_id+content_hash 幂等)。
 3. **桥接点亮**:直装案例后,`bridge.cases_for_clauses` 精确反查命中 + R5 `resolve_cited_clauses` 桥接通道集成测通过(现空转→有数据)。
+
+> **§8.3 精确桥接的顺序与批末对账(2026-07-15 修订)**:案例结构化直装在 S4 当下用 `CASE_PUNISH.LAW_CONTENT_CODE` 精确查 `chunks.source_code`(限 effective P-EXT)。**⚠ 不能依赖处理顺序保证命中**:`_structuring` 在**同一步内**跑 S3(建 chunk)+ S4(案例桥接),而 `run_until_idle`/`docs_in_states` **不保证同轮内文档处理顺序**(无 `ORDER BY`,顺序由 DB 堆扫描决定)——故同批案例 S4 可能先于被引法规 S3 执行,当场落 fuzzy(先前"lockstep 保证法规 S3 早于案例 S4"的说法不成立,≈96.7% 只是当前 ctid 堆序的经验产物)。**为此批末做批内作用域对账** `reconcile_preseg_case_refs(ctx, batch_id)`:扫**本批**含 fuzzy 条目的案例(`cited_regulations @> [{"match":"fuzzy"}]`),从其 raw 一次收锚(`law_content_code`)→ **单次** bulk 查 effective P-EXT `chunks.source_code` 建映射 → 逐案**只定点升级命中锚的 fuzzy 条目**(`align_cited` 逐项 1:1,按位对齐),其余原样保留;批驱动 drain 后本批法规**必已建块** → 升级 exact,**确定性、与扫描顺序无关**。**无命中锚的案例(空锚 fuzzy 主体 / 锚未建块)零 DB 往返**(不逐案 `resolve_exact`/`align_cited`,避免 N+1;Codex 七轮 perf)。由 `python -m pipeline.preseg_ingest` 入口在 `_drive_batch` 后自动调用。**失败口径**(Codex 七轮 reliability):raw 已在 S0 校验、S4 读过——对账**只隔离格式损坏**(`UnicodeDecodeError`/`JSONDecodeError`:warning+计数,留 fuzzy 待 reprocess),**存储/基础设施错误向上抛**(入口非零退出),不静默留 fuzzy。**边缘退化(有效兜底,非降级红线)**:①案例与被引法规**跨批**(案例早批入库、法规晚批到);②案例引用 `upcoming` 法规,后经 `activate` 转 `effective`;③**无源锚**的引用(仅标题,`align_cited` fuzzy),即便同批竞态使其一度未解析,批末对账也**不定点重解析**(对账只升级有锚 fuzzy→exact)。这几类**批内对账不覆盖** → 退 **fuzzy 标题对齐**(仍可命中,只是非精确)。**精确恢复动作 = `reprocess <case_dvid>`**(重置 REGISTERED → 复用**同 dvid** 重跑 S3/S4,走 `_align_violated` 全量对齐,此时法规已 effective+建块 → 升级 exact,亦恢复 ③;见 `cli.reprocess_to_indexed`)。**⚠ 不是"重灌"**:同内容重灌走 `preseg_ingest` 经 S0 `find_existing_case_doc`(content_hash 判重)= **DUPLICATE no-op**,不重跑 S4、不升级桥接。若未来跨批边缘量大,再引**内部持久重试队列**(按 newly-effective `source_code` 定向消费,不入 `cited_regulations`/不泄漏 API)—— 待办,非本轮契约。
 4. 效力状态映射:四态直落 + 未知值进 meta_confirm 队列,单测覆盖映射表全部枚举。
 5. 推导器 golden 集(仿条款树 golden 先例):条款标识样例→norm,P=R=1.0;失败样例正确落伪路径+标记。
 6. 配置缝回归:indicators 改读 yaml 后,四个既有 profile 的 QC 行为与改造前逐指标一致(对拍测试)。

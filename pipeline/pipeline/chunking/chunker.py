@@ -54,6 +54,8 @@ class ChunkSpec:
     embed_status: str = "pending"  # pending | done | failed(建块即 pending)
     # 适用实体类型(CP-010 D7:preseg 文档级"适用对象"继承;自建通道恒 None,E2 走 clause_tags)
     entity_type: list | None = None
+    # 源条款锚(CP-010:LAW_CONTENT.CODE;preseg 精确桥接落点,自建通道恒 None → 回落 fuzzy align)
+    source_code: str | None = None
 
 
 def count_tokens(text: str) -> int:

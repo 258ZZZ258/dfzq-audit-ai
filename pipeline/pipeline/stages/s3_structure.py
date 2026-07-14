@@ -67,4 +67,5 @@ def _to_row(spec: ChunkSpec, degraded: bool) -> Chunk:
         oversize=spec.oversize,  # 单段超长字符硬切的质量信号
         degraded=degraded,  # 取自 dv.degraded;chunk_status 用模型默认 staging
         entity_type=spec.entity_type,  # D7:preseg 文档级适用对象继承(自建通道 None)
+        source_code=spec.source_code,  # CP-010:源条款锚 LAW_CONTENT.CODE(自建通道 None)
     )

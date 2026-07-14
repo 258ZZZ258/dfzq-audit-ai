@@ -20,9 +20,12 @@ from pathlib import Path
 from common.manifest import REQUIRED_COLUMNS
 
 #: 扩展列(SPEC §3.2):幂等键两分量 + 源元数据。列集精确匹配,缺/多整批拒收(承 s0 语义)。
+#: CP-010 内网对齐补 source_law_id(LAW_BASIC.SOURCE_LAW_ID,版本链源)+ invalid_date
+#: (LAW_BASIC.INVALID_DATE,失效日期 provenance;效力状态仍由 effective_status→status_map 源权威)。
 PRESEG_EXTRA_COLUMNS = [
     "source_doc_id", "content_hash", "effective_status",
     "issuer_level_src", "entity_types", "tags", "file_no", "source_created_by",
+    "source_law_id", "invalid_date",
 ]
 PRESEG_REQUIRED_COLUMNS = [*REQUIRED_COLUMNS, *PRESEG_EXTRA_COLUMNS]
 
@@ -40,6 +43,10 @@ class PresegBlock:
     text: str
     clause_label: str | None = None
     is_table: bool = False
+    # ── CP-010 内网 8 表对齐(可空;老批次不带→回落现有行为)──
+    source_code: str | None = None  # 源条款锚 LAW_CONTENT.CODE(精确桥接落点)
+    clause_path_norm: str | None = None  # 转换脚本从 PATH_CODE 算好的权威 norm(缺→回落 derive)
+    is_catalog: bool = False  # IS_CATALOG==1 → 章节标题块(不成 chunk;替代 derive 章/节判别)
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,9 @@ class ViolatedReg:
     title: str
     clause_label: str | None = None
     content: str | None = None
+    # ── CP-010 精确桥接:源已算好的条款外键(缺→回落 title/clause 模糊对齐)──
+    law_code: str | None = None  # ZNFG_IAM_LAW_BASIC.CODE
+    law_content_code: str | None = None  # ZNFG_IAM_LAW_CONTENT.CODE → 直连 chunks.source_code
 
 
 @dataclass(frozen=True)
@@ -124,6 +134,9 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
         blk_text = rec.get("text")
         clause_label = rec.get("clause_label")
         is_table = rec.get("is_table", False)
+        is_catalog = rec.get("is_catalog", False)
+        source_code = rec.get("source_code")
+        clause_path_norm = rec.get("clause_path_norm")
         # bool 是 int 子类:显式排除,否则 block_seq=true 会被当 1 混入(错序/重号)
         if not isinstance(seq, int) or isinstance(seq, bool):
             errors.append(f"line {lineno}: block_seq 缺失或非整数")
@@ -141,6 +154,19 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
         if not isinstance(is_table, bool):  # 勿 bool() 强转——"false"/0/[] 会被误判(错解表格)
             errors.append(f"line {lineno}: is_table 须为布尔(得 {type(is_table).__name__})")
             continue
+        # ── CP-010 新增字段严校验(同口径:出现即须正确类型,否则整文件拒收)──
+        if not isinstance(is_catalog, bool):  # 同 is_table:勿 bool() 强转
+            errors.append(f"line {lineno}: is_catalog 须为布尔(得 {type(is_catalog).__name__})")
+            continue
+        bad_str = next(
+            (f"line {lineno}: {k} 须为字符串(得 {type(rec.get(k)).__name__})"
+             for k in ("source_code", "clause_path_norm")
+             if rec.get(k) is not None and not isinstance(rec.get(k), str)),
+            None,
+        )
+        if bad_str:
+            errors.append(bad_str)
+            continue
         seen_seq.add(seq)
         blocks.append(
             PresegBlock(
@@ -148,6 +174,9 @@ def parse_blocks(text: str, name: str) -> list[PresegBlock]:
                 text=blk_text,
                 clause_label=clause_label or None,
                 is_table=is_table,
+                source_code=source_code or None,
+                clause_path_norm=clause_path_norm or None,
+                is_catalog=is_catalog,
             )
         )
     if errors:
@@ -164,7 +193,11 @@ def blocks_content_hash(blocks: list[PresegBlock]) -> str:
     """
     canon = [
         {"block_seq": b.block_seq, "text": b.text,
-         "clause_label": b.clause_label, "is_table": b.is_table}
+         "clause_label": b.clause_label, "is_table": b.is_table,
+         # CP-010:三者实质影响产物(norm→chunk_id、source_code→桥接、is_catalog→成不成块),
+         # 纳入指纹,否则"仅改结构元数据"的变化件被误判 DUPLICATE 而漏更新
+         "source_code": b.source_code, "clause_path_norm": b.clause_path_norm,
+         "is_catalog": b.is_catalog}
         for b in sorted(blocks, key=lambda b: b.block_seq)
     ]
     payload = json.dumps(canon, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -218,9 +251,10 @@ def read_cases(path: Path) -> list[PresegCase]:
                 bad = True
                 break
             # clause_label 非 str → 下游条号归一化崩;content 非 str 违约声明契约。缺(None)允许。
+            # law_code/law_content_code(CP-010 精确锚)非 str → 桥接精确查用错类型键。缺(None)允许。
             sub_err = next(
                 (f"line {lineno}: violated_regulations[{j}].{k} 须为字符串"
-                 for k in ("clause_label", "content")
+                 for k in ("clause_label", "content", "law_code", "law_content_code")
                  if v.get(k) is not None and not isinstance(v.get(k), str)),
                 None,
             )
@@ -233,6 +267,8 @@ def read_cases(path: Path) -> list[PresegCase]:
                     title=title,
                     clause_label=v.get("clause_label") or None,
                     content=v.get("content") or None,
+                    law_code=v.get("law_code") or None,
+                    law_content_code=v.get("law_content_code") or None,
                 )
             )
         if bad:

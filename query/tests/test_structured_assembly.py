@@ -127,6 +127,25 @@ def test_case_verbatim_and_l2_omitted_when_absent():
     assert "violation_theme" not in c2 and "related_regulations" not in c2
 
 
+def test_related_regulations_preseg_dict_projected_to_strings():
+    # PRESEG 案例 cited_regulations 是 dict → 投影 list[str],不泄漏内部字段(resolved/match/锚)
+    cited = [
+        {"doc_no": "证监会令第300号", "title": "证券公司客户招揽管理办法",
+         "clause_path_norm": "1/21", "resolved": True, "match": "exact",
+         "law_content_code": "LC-021"},
+        {"doc_no": None, "title": "证券法", "clause_path_norm": None,
+         "resolved": False, "match": "fuzzy"},
+    ]
+    case_rows = {"DC1": (_case(org="上海证监局", cited=cited), _dv("某案"))}
+    cases = assemble_structured(
+        [], [_cand("c1", 5.0, "P-CASE", "DC1")], {}, case_rows
+    ).to_dict()["cases"]["items"]
+    rr = cases[0]["related_regulations"]
+    assert rr == ["证券公司客户招揽管理办法 1/21", "证券法"]
+    assert all(isinstance(x, str) for x in rr)  # 契约 list[str]
+    assert all("law_content_code" not in x and "match" not in x for x in rr)  # 内部字段不泄漏
+
+
 def test_empty_inputs_all_tabs_zero():
     s = assemble_structured([], [], {}, {}).to_dict()
     for tab in ("regulations", "clauses", "regulatory_rules", "cases"):

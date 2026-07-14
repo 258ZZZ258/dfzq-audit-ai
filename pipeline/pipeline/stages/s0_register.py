@@ -410,6 +410,7 @@ def _register_one_preseg(
                 doc_number=str(row.get("doc_number") or "") or None,
                 issue_date=_parse_issue_date(row.get("issue_date")),
                 effective_date=_parse_issue_date(row.get("effective_date")),
+                invalid_date=_parse_issue_date(row.get("invalid_date")),  # 失效日期(provenance)
                 sub_type=str(row.get("sub_type") or "") or None,
                 title=title or None,
                 version_relation=relation,
@@ -418,6 +419,7 @@ def _register_one_preseg(
                 version_status_source=status_source,
                 source_doc_id=sid,
                 content_hash=chash,
+                source_law_id=str(row.get("source_law_id") or "") or None,  # 版本链源(provenance)
                 issuer_level_src=str(row.get("issuer_level_src") or "") or None,
                 entity_types=[
                     t for t in str(row.get("entity_types") or "").strip().split(";") if t
