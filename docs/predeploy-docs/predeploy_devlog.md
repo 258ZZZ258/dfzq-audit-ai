@@ -424,3 +424,20 @@ export 9 + cases_ingest(含 reconcile)+ s0/reader/adapter + 桥接集成 全绿�
 - **[warn] status_map SPEC 漂移(F7)**:SPEC 仍是旧草案。修:**SPEC-PRESEG §4 更新真值域表**(英文码 + draft=征求意见稿→
   upcoming + test_run 排除)+ Ask-first 留痕(待报备甲方)。
 - **验证**:全仓 ruff 绿;1094 collect 0 error;export 19 + 触及面 124 passed/4 skipped(真 PG);单 head 0015。
+
+## 2026-07-15 Codex 三轮 review 修复(6 条)+ 版本链探查结论 + 效力映射批准
+
+**explore3 结论**:版本链三字段不可用——`SOURCE_LAW_ID` 全空串(distinct=1)、`NEW_CODE`/`ABOLISH_CODE`
+指向他法命中 **0** → **自动 supersedes 放弃**(关闭"待定")。`CASE_PARTY` 空(甲方只灌处罚→法规链,无当事人)。
+未命中锚 3737 中 **3736 是空锚**(I2)——指导 R2 只重试有锚案例。
+
+**Codex 三轮 6 findings**:
+- **R1 导出仍非原子**:staging 后仍先 rmtree 旧目录再 replace,有窗口。修:**拒绝写入非空目录**(绝不销毁已有批次)
+  + 空目录 rmdir 后 `os.replace` 到不存在目标(原子)。
+- **R2 全局对账无界 + N+1 + 坏对象崩批**:修:①**只重试"有锚未解析"案例**(`_align_violated` 给 fuzzy 保留
+  `law_content_code`,reconcile 按此筛,排除 3736 空锚永久 fuzzy);②**单条坏 raw 隔离**(try/except 不阻塞收尾)。
+- **R3 去重冲突仍静默留首见**:改 **同 CODE 内容冲突 → 拒收整部法规**(可审计,不假设首见权威)。
+- **R4 respondent 未校验**:`persons[0].name`(投影 `cases.respondent` VARCHAR(256))补 `_bound`。
+- **R5 source_created_by 未校验**:`CREATOR_ID`(→VARCHAR(64))改 `_bound`(原漏用 `_s`)。
+- **R6 status_map Ask-first**:decision 方**已批准**(2026-07-15)draft→upcoming + test_run 跳过;SPEC §4 记批准。
+- **验证**:全仓 ruff 绿;1096 collect;export 21 + 触及面 122 passed/4 skipped(真 PG);单 head 0015。

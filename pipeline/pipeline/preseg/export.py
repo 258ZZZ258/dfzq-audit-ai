@@ -59,6 +59,8 @@ _COL_WIDTHS = {
     # 案例(cases.jsonl → doc_versions/cases)
     "case_name": 512, "source_case_id": 64, "case_doc_number": 128,
     "penalty_org": 256, "case_type": 64, "source_url": 512,
+    "respondent": 256,  # cases.respondent = persons[0].name 的投影(Codex 三轮 R4)
+    "source_created_by": 64,  # doc_versions.source_created_by ← CREATOR_ID(Codex 三轮 R5)
 }
 
 
@@ -166,9 +168,10 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
     - 正文取 CONTENT(图片/视频详情本轮跳过);空正文目录节点用 TITLE 兜底成块。
     """
     # 去重:真数据(探查 G1/G2)每节点有 2 物理行(**同 CODE 异 snowflake ID,内容一致**,
-    # 全表 COUNT(DISTINCT CODE)恒=1)→ 按 CODE 保留首见。但**不假设内容必然一致**(Codex 二轮 F8):
-    # 同 CODE 若 TITLE/CONTENT/IS_CATALOG/INDEX_NO 冲突(未来/异常数据),告警留痕再保留首见(确定性
-    # 靠 DmSource 的 ORDER BY CODE,ID),不静默丢失冲突。无 CODE 行(罕见)不去重全保留。
+    # 全表 COUNT(DISTINCT CODE)恒=1)→ 同 CODE **内容一致**即去重(保留首见,确定性靠 DmSource
+    # 的 ORDER BY)。若同 CODE **内容冲突**(TITLE/CONTENT/IS_CATALOG/INDEX_NO 不一致,未来/异常数据)
+    # → **拒收整部法规**(可审计):保留首见只是"数据丢失可复现",不能证明哪版权威(Codex 三轮 R3)。
+    # 无 CODE 行(罕见)不去重全保留。
     deduped: list[dict] = []
     by_code: dict[str, dict] = {}
     for c in _live(contents):
@@ -178,7 +181,7 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
             continue
         if code in by_code:
             if _content_sig(c) != _content_sig(by_code[code]):
-                warnings.append(f"同 CODE={code} 重复行内容冲突,保留首见")
+                raise PresegExportError(f"同 CODE={code} 重复行内容冲突,无法判权威版 → 拒收该法规")
             continue
         by_code[code] = c
         deduped.append(c)
@@ -247,6 +250,8 @@ def case_record(case: dict, parties: list[dict], punishes: list[dict]) -> dict:
     边界校验:超列宽 → 拒收该案(Codex 二轮 F3);problem_summary/description 是 chunk 文本,不限长。
     """
     persons = [_person(p) for p in sorted(_live(parties), key=lambda r: _int(r.get("PARTY_INDEX")))]
+    if persons:  # 结构化直装把 persons[0].name 投影进 cases.respondent VARCHAR(256) → 边界校验(R4)
+        _bound(persons[0].get("name"), "respondent")
     vregs = [
         _violated(p) for p in sorted(_live(punishes), key=lambda r: _int(r.get("PUNISH_INDEX")))
     ]
@@ -307,7 +312,7 @@ def manifest_row(law: dict, blocks: list[dict], filename: str) -> dict:
         file_no=_bound(law.get("DOC_NO"), "file_no"),
         source_law_id=_bound(law.get("SOURCE_LAW_ID"), "source_law_id"),
         entity_types=entity_types_of(law.get("SUIT_OBJ_CODE")),  # 适用对象(D7,写投影)
-        source_created_by=_s(law.get("CREATOR_ID")),  # 源创建人(provenance)
+        source_created_by=_bound(law.get("CREATOR_ID"), "source_created_by"),  # 源创建人(R5)
     )
     # biz_domain:LAW_BASIC 无干净专列(仍 seam);supersedes 由 SOURCE_LAW_ID/ABOLISH_CODE 生成待定
     return row
@@ -326,10 +331,14 @@ def _safe_filename(law_code: str) -> str:
 def build_batch(source: Source, out_dir: Path) -> dict:
     """8 表 → 批次目录。返回统计(含 skipped/warnings)。**只写目录,不入库**。
 
-    **原子替换**(Codex 二轮 F4):先在同父目录的 staging 临时目录完整构建(源读取/落盘都在此),
-    成功后才 rmtree 旧目录 + ``os.replace`` 原子换入——**源读取中途异常绝不销毁已有有效批次**,
-    也不留半批产物(异常时清 staging,out_dir 原样)。"""
+    **不覆盖既有批次 + 原子换入**(Codex 二/三轮 F4/R1):**拒绝写入已存在的非空目录**(彻底消除
+    "先删旧批再 rename"的数据丢失窗口——绝不销毁已有有效批次);在同父目录 staging 完整构建后,
+    ``os.replace`` 原子换入(目标空/不存在,rename 原子)。异常时清 staging,out_dir 原样。"""
     out_dir = Path(out_dir)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise PresegExportError(
+            f"输出目录非空,拒绝覆盖(避免销毁已有批次):{out_dir};请指定新目录或先手动清理"
+        )
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=out_dir.parent, prefix=f".{out_dir.name}.staging-"))
     try:
@@ -337,9 +346,9 @@ def build_batch(source: Source, out_dir: Path) -> dict:
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    if out_dir.exists():  # 仅在 staging 构建成功后才动 out_dir
-        shutil.rmtree(out_dir)
-    os.replace(staging, out_dir)  # 同文件系统原子 rename
+    if out_dir.exists():  # 空目录 → rmdir(仅空目录,无数据)后 rename 到不存在目标(原子)
+        out_dir.rmdir()
+    os.replace(staging, out_dir)
     stats["out_dir"] = str(out_dir)
     return stats
 

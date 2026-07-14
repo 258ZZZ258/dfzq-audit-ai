@@ -86,9 +86,11 @@
 | `test_run` | 3 | (整件跳过) | 测试数据,转换脚本层 `SKIP_STATUS` 排除,不入库、计入 skipped 审计 |
 | 其余未知值 | — | (保默认 `effective`)+ meta_confirm | 不猜,人工定 |
 
-> **Ask-first 变更留痕(SPEC §7)**:上表新增英文枚举 + `draft→upcoming` + `test_run` 排除,属"效力映射枚举增删",
-> 依据=达梦真数据探查(用户跑 SQL 确认 draft=征求意见稿)。**待正式向甲方报备**(与桥接 fuzzy→精确同批报备)。
+> **Ask-first 变更留痕 + 批准(SPEC §7)**:上表新增英文枚举 + `draft→upcoming` + `test_run` 排除,属"效力映射
+> 枚举增删"。依据=达梦真数据探查(SQL 确认 draft=征求意见稿、test_run 仅 3 条测试数据)。
+> **已批准(2026-07-15,决策方拍板)**:draft→upcoming(未生效,可前瞻查询用、不当现行法)、test_run 整件跳过。
 > 中文别名(现行有效/已废止…)保留作历史/自建批次容错。实现:`pipeline/preseg/status_map.py`。
+> (仍与桥接 fuzzy→精确一并向甲方正式报备存档,不阻塞实施。)
 
 ## 5. Schema 变更清单(add-only,一批 Alembic 迁移)
 

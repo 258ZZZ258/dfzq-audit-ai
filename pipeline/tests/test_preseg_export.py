@@ -196,16 +196,16 @@ def test_safe_filename_injective():
     assert a != b and a.startswith("A_B-") and b.startswith("A_B-")
 
 
-def test_stale_output_cleaned_on_reuse(tmp_path):
-    export.build_batch(FakeSource(), tmp_path)
-    assert (tmp_path / "cases.jsonl").exists()
+def test_refuse_nonempty_out_dir(tmp_path):
+    import pytest
 
-    class NoCases(FakeSource):
-        def iter_cases(self):
-            return []
-
-    export.build_batch(NoCases(), tmp_path)  # 复用同目录,本轮无案例
-    assert not (tmp_path / "cases.jsonl").exists()  # 旧 cases.jsonl 已清(不残留再摄取)
+    out = tmp_path / "batch"
+    export.build_batch(FakeSource(), out)
+    old = (out / "manifest.xlsx").read_bytes()
+    # 非空目录 → 拒绝覆盖(不销毁已有批次;Codex 三轮 R1)
+    with pytest.raises(export.PresegExportError):
+        export.build_batch(FakeSource(), out)
+    assert (out / "manifest.xlsx").read_bytes() == old  # 旧批次原样
 
 
 def test_deleted_and_empty_laws_filtered(tmp_path):
@@ -230,8 +230,8 @@ def test_duplicate_code_rows_deduped(tmp_path):
     assert codes.count("LC-021") == 1  # 同 CODE 去重,不产双 block
 
 
-def test_duplicate_code_content_conflict_warns(tmp_path):
-    # 同 CODE 但内容不一致(异常/未来数据)→ 告警留痕(不静默丢失冲突;Codex 二轮 F8)
+def test_duplicate_code_content_conflict_rejects_law(tmp_path):
+    # 同 CODE 但内容冲突(异常/未来数据)→ 拒收整部法规(不静默留首见;Codex 三轮 R3)
     class ConflictSource(FakeSource):
         def contents_for(self, law_code):
             base = super().contents_for(law_code)
@@ -242,15 +242,42 @@ def test_duplicate_code_content_conflict_warns(tmp_path):
             return base
 
     stats = export.build_batch(ConflictSource(), tmp_path)
-    assert any("内容冲突" in w for w in stats["warnings"])
+    assert any("内容冲突" in s for s in stats["skipped"])  # L-1 被拒收 + 审计
+    _, rows = _manifest_rows(tmp_path)
+    assert "L-1" not in {r["source_doc_id"] for r in rows}
 
 
-def test_source_failure_preserves_existing_batch(tmp_path):
+def test_over_width_respondent_rejects_case(tmp_path):
+    # 首位当事人姓名 > 256(投影进 cases.respondent)→ 拒收该案(R4)
+    class BigNameSource(FakeSource):
+        def parties_for(self, case_code):
+            p = super().parties_for(case_code)
+            p[0]["NAME"] = "王" * 300
+            return p
+
+    stats = export.build_batch(BigNameSource(), tmp_path)
+    assert any("respondent" in s for s in stats["skipped"])
+    assert not (tmp_path / "cases.jsonl").exists()  # 唯一案例被拒 → 无 cases 文件
+
+
+def test_over_width_creator_rejects_law(tmp_path):
+    # CREATOR_ID > 64(→ source_created_by VARCHAR(64))→ 拒收该法规(R5)
+    class BigCreatorSource(FakeSource):
+        def iter_laws(self):
+            laws = super().iter_laws()
+            laws[0]["CREATOR_ID"] = "u" * 70
+            return laws
+
+    stats = export.build_batch(BigCreatorSource(), tmp_path)
+    assert any("source_created_by" in s for s in stats["skipped"])
+    _, rows = _manifest_rows(tmp_path)
+    assert "L-1" not in {r["source_doc_id"] for r in rows}
+
+
+def test_source_failure_leaves_no_output(tmp_path):
     import pytest
 
     out = tmp_path / "batch"
-    export.build_batch(FakeSource(), out)
-    old_manifest = (out / "manifest.xlsx").read_bytes()
 
     class BoomSource(FakeSource):
         def iter_laws(self):
@@ -258,5 +285,6 @@ def test_source_failure_preserves_existing_batch(tmp_path):
 
     with pytest.raises(RuntimeError):
         export.build_batch(BoomSource(), out)
-    # 原子替换:staging 构建失败绝不销毁已有有效批次(Codex 二轮 F4)
-    assert (out / "manifest.xlsx").read_bytes() == old_manifest
+    # staging 构建失败:out 未创建、无残留 staging(Codex 二/三轮 F4/R1)
+    assert not out.exists()
+    assert not list(tmp_path.glob(".batch.staging-*"))

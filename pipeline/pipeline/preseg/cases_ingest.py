@@ -137,8 +137,11 @@ def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
     仅改 ``cited_regulations``/``ref_unresolved`` 两列(定点 update,不经 merge 覆盖其余列)。
     ``batch_id`` 仅作日志范围标识。返回更新的案例数。
 
-    ⚠ 现按"全表扫 ref_unresolved 的 preseg 案例"实现(全库自愈,正确性优先);规模上来后可优化为
-    "仅重算引用了本批新增 source_code 的案例"(demo/中等规模可接受,记待办)。
+    **只重试"有锚可解析"的案例**(Codex 三轮 R2):真数据未命中锚 3737 中 3736 是空锚(I2),
+    空锚案例永远靠 fuzzy、reconcile 救不活 → 按 ``cited_regulations`` 内"有 law_content_code 且未
+    resolved"的条目筛(轻量,只读 Case 行不读 ObjectStore),把昂贵的对齐限定在可能自愈的案例。
+    **单条历史坏对象(缺失/JSON 损坏)隔离**,不让一个坏 raw 阻塞无关新批次收尾。
+    ⚠ Case 行扫描仍 O(未解析数);规模上来后可换"按本批新增 source_code 反查 + 持久重试队列"(记待办)。
     """
     from sqlalchemy import select
 
@@ -146,26 +149,33 @@ def reconcile_preseg_case_refs(ctx: StageContext, batch_id: str) -> int:
     from pipeline.meta.reg_lookup import PgRegLookup
 
     with ctx.db.session() as s:
-        targets = [
-            (dvid, raw_key)
-            for dvid, raw_key in s.execute(
-                select(DocVersion.doc_version_id, DocVersion.raw_object_key)
-                .join(Document, DocVersion.logical_id == Document.logical_id)
-                .join(Case, Case.doc_version_id == DocVersion.doc_version_id)
-                .where(
-                    DocVersion.source_format == "preseg",  # 全局(跨批):不限 batch_id
-                    Document.corpus_type == "P-CASE",
-                    Case.ref_unresolved.is_(True),  # 仅重试仍有未解析引用者
-                )
+        candidates = s.execute(
+            select(DocVersion.doc_version_id, DocVersion.raw_object_key, Case.cited_regulations)
+            .join(Document, DocVersion.logical_id == Document.logical_id)
+            .join(Case, Case.doc_version_id == DocVersion.doc_version_id)
+            .where(
+                DocVersion.source_format == "preseg",  # 全局(跨批):不限 batch_id
+                Document.corpus_type == "P-CASE",
+                Case.ref_unresolved.is_(True),
             )
-        ]
+        ).all()
+    # 只留"有锚未解析"的(排除空锚永久 fuzzy 案例)
+    targets = [
+        (dvid, raw_key)
+        for dvid, raw_key, cited in candidates
+        if any(isinstance(e, dict) and e.get("law_content_code") and not e.get("resolved")
+               for e in (cited or []))
+    ]
     if not targets:
         return 0
     lookup = PgRegLookup(ctx.db)
     updated = 0
     for dvid, raw_key in targets:
-        rec = json.loads(ctx.object_store.get(raw_key).decode("utf-8"))
-        aligned, unresolved = _align_violated(rec.get("violated_regulations") or [], lookup)
+        try:
+            rec = json.loads(ctx.object_store.get(raw_key).decode("utf-8"))
+            aligned, unresolved = _align_violated(rec.get("violated_regulations") or [], lookup)
+        except Exception:  # noqa: BLE001 - 单条坏 raw 隔离,不阻塞整批收尾
+            continue
         with ctx.db.session() as s:
             case = s.get(Case, dvid)
             if case is None or (
@@ -205,6 +215,8 @@ def _align_violated(vregs: list, lookup) -> tuple[list, bool]:
         rows, u = align_cited([{"title": v.get("title"), "clause": v.get("clause_label")}], lookup)
         for r in rows:
             r["match"] = "fuzzy"
+            if lcc:  # 有锚但此刻未命中(法规尚未建块)→ 保留锚,供批后对账筛"可重试"
+                r["law_content_code"] = lcc  # 排除空锚永久 fuzzy 案例(I2:3736/3737 是空锚)
         out.extend(rows)
         unresolved = unresolved or u
     return out, unresolved
