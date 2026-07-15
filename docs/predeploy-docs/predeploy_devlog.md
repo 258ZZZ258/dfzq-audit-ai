@@ -485,3 +485,11 @@ Codex 六轮 2 条 warning **都指向五轮那次退对账引入的裂缝**—�
 - **恢复口径纠正**:SPEC §8.3 + preseg_ingest 注释删"重灌即升级"假描述,改**`reprocess <case_dvid>`**(重置 REGISTERED→复用同 dvid 重跑 S3/S4);明确重灌=DUPLICATE no-op、不是恢复动作。
 - **测试改真**:①`test_same_batch_race_healed_by_batch_reconcile`(fuzzy→批内对账→exact,+ 批内作用域:别的 batch_id 不动本案);②`test_reingest_same_case_is_duplicate_noop_not_recovery`(证 F2:重灌=DUPLICATE、复用原 dvid);③模型门 e2e `test_preseg_case_reprocess_recovers_bridge`(公开 reprocess 入口重处理虚拟案例→重回 INDEXED+exact,验 F2 真实恢复)。
 - **验证**:全仓 ruff 绿;触及面 PG-only 14 passed(真 PG);e2e reprocess 测为模型门(本会话 BGE 未起 → skip,correct-by-construction)。
+
+## 2026-07-15(五续)Codex 七轮:批内对账的 perf/reliability + 恢复测试假绿(全在六轮改动上)
+
+Codex 七轮 3 warning 全在六轮那次批内对账 + e2e reprocess 测:
+- **F1 e2e 恢复测试无 fuzzy 前置**:`driven` 已把法规+案例完整驱动,案例调 reprocess 前**本就 exact** → 只验了 exact→reprocess→exact,即便 reprocess 不升级 fuzzy 也过(还因模型门 skip)。→ **拆两测**:①PG-only `test_reprocess_rerun_recovers_fuzzy_to_exact_idempotent`(**genuine** 前置:案例先跑断言 fuzzy → 法规建块 → reprocess 语义重跑 S3/S4 → exact → 再跑幂等;可实跑验证);②e2e `test_preseg_case_reprocess_via_public_entry` 降格为**只证公开入口对虚拟案例跑通**(reprocess_to_indexed→INDEXED+投影),删恢复假断言。
+- **F2 批内对账仍逐案 N+1**:每 target 读 raw + 逐 ref `resolve_exact`,空锚/未命中还进 `align_cited` 的标题+chunk 查询;devlog 记 3737 fuzzy 中 3736 空锚 → 首批/幂等重跑数千次无效 DB 往返。→ **改定点批量**:一次收锚 → **单次** bulk 查 P-EXT `chunks.source_code` 建映射 → 逐案**只升级命中锚的 fuzzy 条目**(`align_cited` 逐项 1:1,按位对齐),**无命中锚案例零 DB 往返**(pre-check 不开 session)。非锚标题 fuzzy 不再在对账里重解析(退 `reprocess` 全量恢复,SPEC §8.3 ③)。
+- **F3 静默吞存储失败**:对账是保 exact 的唯一机制,但 broad `except: continue` 把 ObjectStore/UTF-8/JSON 失败静默咽掉、ingest 仍报成功却留 fuzzy。→ **收窄**:只捕 `UnicodeDecodeError`/`JSONDecodeError`(格式损坏:warning+计数,留 fuzzy 可 reprocess),**存储/基础设施错不捕获、向上抛**(入口非零退出)。
+- **验证**:全仓 ruff 绿;preseg 触及面 PG-only 10 passed(真 PG,含 genuine fuzzy→exact→幂等);e2e 模型门(本会话 skip)。

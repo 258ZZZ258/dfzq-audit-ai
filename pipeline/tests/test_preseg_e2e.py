@@ -194,17 +194,17 @@ def test_cold_backup_present_for_rebuild(driven):
     assert chunks and all(c.dense_vec_cold is not None for c in chunks)
 
 
-def test_preseg_case_reprocess_recovers_bridge(driven):
-    """Finding 2 恢复口径:PRESEG 虚拟案例的精确恢复动作 = ``reprocess <case_dvid>``(重置 REGISTERED
-    → 复用同 dvid 重跑 S3/S4 → 重回 INDEXED),**非重灌**(同内容重灌经 S0 幂等 = DUPLICATE no-op,
-    见 test_preseg_cases_ingest)。验证虚拟案例可经公开 reprocess 入口重处理:重回 INDEXED、桥接
-    重解析(法规已建块 → exact)、Milvus 投影重建就位。**放本文件最后**,避免扰动共享 driven
-    (reprocess 幂等回到 INDEXED,chunk_id 确定性不漂移)。"""
+def test_preseg_case_reprocess_via_public_entry(driven):
+    """PRESEG **虚拟案例**可经公开 reprocess 入口重处理(``cli.reprocess_to_indexed``:重置 REGISTERED
+    → 复用**同 dvid** 重跑 S1→S3→S4→S5 → 重回 INDEXED、Milvus 投影重建),**非重灌**(同内容重灌经
+    S0 幂等 = DUPLICATE no-op,见 test_preseg_cases_ingest)。**本测只证公开入口对虚拟案例可跑通**;
+    genuine 的 fuzzy→exact 桥接恢复语义由 PG-only 测
+    ``test_reprocess_rerun_recovers_fuzzy_to_exact_idempotent`` 覆盖(此处法规已建块、案例本就 exact,
+    不再重复断言恢复)。**放本文件最后**,避免扰动共享 driven(reprocess 幂等回 INDEXED,不漂移)。"""
     pg, mio, ctx, report, dvids = driven
     case_dvid = next(v for k, v in dvids.items() if k and "招揽客户案" in str(k))
     final = cli.reprocess_to_indexed(pg, ctx, case_dvid, operator="test")
-    assert final == "INDEXED"
+    assert final == "INDEXED"  # 虚拟案例走通完整重处理链
     case = ctx.db.get_case(case_dvid)
-    assert case is not None and case.cited_regulations
-    assert case.cited_regulations[0]["match"] == "exact"  # 法规已建块 → 重跑 S4 精确命中
+    assert case is not None and case.cited_regulations  # 案例行 + 引用留存
     assert mio.count(case_dvid) > 0  # 投影重建就位

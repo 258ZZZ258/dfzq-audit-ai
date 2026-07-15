@@ -195,6 +195,41 @@ def test_reingest_same_case_is_duplicate_noop_not_recovery(env):
     assert dup.doc_version_id == first.doc_version_id  # 复用原 dvid,无新版本
 
 
+def test_reprocess_rerun_recovers_fuzzy_to_exact_idempotent(env, monkeypatch):
+    """跨批/upcoming 边缘的精确恢复动作 = ``reprocess <case_dvid>``(重置 REGISTERED→复用同 dvid
+    重跑 S1→S3→S4→S5)。此处直接驱动 S1/S3/S4 建模其**桥接语义**(桥接只由 S4 ``_align_violated``
+    定,S5/milvus 不改桥接;完整公开入口整链见模型门 test_preseg_e2e)。**genuine 前置**:案例先于
+    法规建块跑 → 断言 **fuzzy**;法规建块后重跑 → **exact**;再重跑 → **幂等 exact**(§8.3)。"""
+    from pipeline.meta import case_extract
+
+    ctx, batches = env
+    bid = "preseg-t9-reprocess"
+    batches.append(bid)
+    r = register_preseg_batch(ctx, bid, FIXTURES, FIXTURES / "manifest.xlsx")
+    monkeypatch.setattr(case_extract, "extract_case",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no llm")))
+    case_dvid = next(
+        o.doc_version_id for o in r.outcomes
+        if o.filename == "某证券营业部员工微信二维码违规招揽客户案"
+    )
+    ext_dvid = next(o.doc_version_id for o in r.outcomes if o.filename == "ext-001")
+
+    _run_case(ctx, case_dvid)  # 案例先跑(被引法规未建块)→ fuzzy 前置(genuine,非 exact→exact)
+    pre = ctx.db.get_case(case_dvid)
+    assert pre.ref_unresolved is True and pre.cited_regulations[0]["match"] == "fuzzy"
+
+    s3_structure.run(ctx, ext_dvid)  # 被引法规建块(effective P-EXT)
+    _run_case(ctx, case_dvid)  # reprocess 语义:同 dvid 重跑 S3/S4 → 升级 exact
+    case = ctx.db.get_case(case_dvid)
+    assert case.ref_unresolved is False
+    assert case.cited_regulations[0]["match"] == "exact"
+    assert case.cited_regulations[0]["clause_path_norm"] == "1/21"
+
+    _run_case(ctx, case_dvid)  # 再重跑 → 幂等(仍 exact,不漂移)
+    idem = ctx.db.get_case(case_dvid)
+    assert idem.ref_unresolved is False and idem.cited_regulations[0]["match"] == "exact"
+
+
 def test_config_seam_flips_back_to_llm_path(env, monkeypatch):
     """case_ref_source 翻回 llm → 走既有 L1 路径(机制保留,B8)。"""
     ctx, batches = env
