@@ -87,8 +87,8 @@ def _sparse_for_milvus(sparse: dict) -> dict[int, float]:
     return {int(k): float(v) for k, v in sparse.items()}
 
 
-def _to_milvus_dict(r: CorpusRow) -> dict:
-    return {
+def _to_milvus_dict(r: CorpusRow, *, bm25: bool = False) -> dict:
+    d = {
         "chunk_id": r.chunk_id,
         "dense_vec": r.dense,
         "sparse_vec": _sparse_for_milvus(r.sparse),
@@ -108,6 +108,9 @@ def _to_milvus_dict(r: CorpusRow) -> dict:
         "text": r.text,
         "degraded": r.degraded,
     }
+    if bm25:  # BM25 function 从 text 产 sparse_vec;摄取端不写(否则 Milvus 拒插 function 输出字段)
+        del d["sparse_vec"]
+    return d
 
 
 def _hits(res, fields: list[str] = _OUTPUT_FIELDS) -> list[dict]:
@@ -124,6 +127,7 @@ def _hits(res, fields: list[str] = _OUTPUT_FIELDS) -> list[dict]:
 class MilvusIO:
     def __init__(self, settings: Settings) -> None:
         self.cfg = settings.milvus
+        self.sparse_backend = settings.embedding.sparse_backend  # CP-012:bge|bm25|none
 
     def connect(self) -> None:
         connections.connect(alias=_ALIAS, host=self.cfg.host, port=str(self.cfg.port))
@@ -132,8 +136,11 @@ class MilvusIO:
         connections.disconnect(_ALIAS)
 
     def schema(self) -> CollectionSchema:
-        """audit_corpus collection schema —— 契约定义在 common.milvus_schema(只搬位置,值不变)。"""
-        return audit_corpus_schema()
+        """audit_corpus collection schema —— 契约定义在 common.milvus_schema(只搬位置,值不变)。
+
+        CP-012:``sparse_backend=bm25`` 时 text 开 analyzer + 挂 BM25 function;bge/none 为现状形态。
+        """
+        return audit_corpus_schema(self.sparse_backend, analyzer_type=self.cfg.bm25_analyzer_type)
 
     def create_collection(self, *, drop_existing: bool = False) -> Collection:
         """建 audit_corpus + 索引(dense=HNSW/COSINE,sparse=SPARSE_INVERTED_INDEX/IP)。
@@ -155,10 +162,17 @@ class MilvusIO:
                 "params": {"M": self.cfg.hnsw_m, "efConstruction": self.cfg.hnsw_ef_construction},
             },
         )
-        col.create_index(
-            "sparse_vec",
-            {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"},
+        # bm25:BM25 metric + k1/b(Milvus 原生全文检索);bge/none:IP(客户端稀疏向量,现状 byte 等价)
+        sparse_index = (
+            {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "BM25",
+                "params": {"bm25_k1": self.cfg.bm25_k1, "bm25_b": self.cfg.bm25_b},
+            }
+            if self.sparse_backend == "bm25"
+            else {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"}
         )
+        col.create_index("sparse_vec", sparse_index)
         col.load()
         return col
 
@@ -183,9 +197,10 @@ class MilvusIO:
         if not rows:
             return 0
         bs = batch_size or self.cfg.upsert_batch
+        bm25 = self.sparse_backend == "bm25"  # bm25:剔除 sparse_vec(Milvus function 从 text 产)
         col = self._collection()
         for i in range(0, len(rows), bs):
-            col.upsert([_to_milvus_dict(r) for r in rows[i : i + bs]])
+            col.upsert([_to_milvus_dict(r, bm25=bm25) for r in rows[i : i + bs]])
         return len(rows)
 
     def flush(self) -> None:
