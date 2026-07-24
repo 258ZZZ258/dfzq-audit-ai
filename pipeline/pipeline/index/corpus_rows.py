@@ -75,6 +75,8 @@ def build_rows(
             chunk_type=c.chunk_type or "", clause_path=c.clause_path or "",
             page_start=c.page_start or 0, effective_date=eff,
             text=_truncate_text(c.text or ""), degraded=bool(c.degraded),
+            source_code=c.source_code or "",  # DM LAW_CONTENT.CODE(preseg 透传;非 DM 源为空)
+            source_doc_id=dv.source_doc_id or "",  # DM LAW_BASIC.CODE(文档级)
         )
         for c, (dense, sparse) in zip(chunks, vectors, strict=True)
     ]

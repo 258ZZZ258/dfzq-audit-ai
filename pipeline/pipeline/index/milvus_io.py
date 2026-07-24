@@ -32,6 +32,7 @@ _ALIAS = "default"
 #: 检索输出字段(四级引用 + 状态/降级标记)
 _OUTPUT_FIELDS = [
     "chunk_id", "doc_version_id", "corpus_type", "status", "clause_path", "page_start", "degraded",
+    "source_code", "source_doc_id",  # DM 回查键(CP-010;Java 按此回查达梦四级引用)
 ]
 
 
@@ -57,6 +58,8 @@ class CorpusRow:
     effective_date: int  # yyyymmdd(0=未知)
     text: str  # 截断文本(检索-重排一跳;展示回查 PG)
     degraded: bool
+    source_code: str = ""  # DM LAW_CONTENT.CODE(条/块级回查键;非 DM 源 / 超256弃锚为空串)
+    source_doc_id: str = ""  # DM LAW_BASIC.CODE(文档级回查键)
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,8 @@ def _to_milvus_dict(r: CorpusRow) -> dict:
         "effective_date": r.effective_date,
         "text": r.text,
         "degraded": r.degraded,
+        "source_code": r.source_code,
+        "source_doc_id": r.source_doc_id,
     }
 
 
