@@ -18,11 +18,28 @@ from pipeline.stage_base import StageContext, StageResult
 from pipeline.states import PipelineState
 
 
+def guard_sparse_backend(sparse_backend: str, chunks, embs) -> None:
+    """CP-012:``bge`` 后端却拿空 sparse(如误配内网 vLLM only-dense)→ fail-fast,不静默退 dense-only。
+
+    ``bge`` 语义要求客户端产非空 lexical sparse;非空文本块 sparse 为空 = 端点没吐稀疏 → 早失败。
+    ``bm25`` / ``none`` 不产客户端 sparse(Milvus 侧算 / 纯 dense),跳过校验。
+    """
+    if sparse_backend != "bge":
+        return
+    for c, e in zip(chunks, embs, strict=True):
+        if c.text.strip() and not e.sparse:
+            raise RuntimeError(
+                f"sparse_backend=bge 但块 {c.chunk_id} 文本非空却空 sparse:嵌入端点未返稀疏"
+                "(内网 vLLM only-dense 请设 PIPELINE_SPARSE_BACKEND=bm25)"
+            )
+
+
 def embed(ctx: StageContext, doc_version_id: str) -> StageResult:
     """EMBEDDING:嵌入非 parent 块 → 冷备写 PG → Milvus upsert(staging)→ INDEXING。"""
     chunks = indexable_chunks(ctx.db, doc_version_id)
     if chunks:
         embs = ctx.embedding.embed([c.text for c in chunks])
+        guard_sparse_backend(ctx.config.embedding.sparse_backend, chunks, embs)
         ctx.db.write_cold_vectors(
             {
                 c.chunk_id: (dense_to_bytes(e.dense), sparse_to_bytes(e.sparse))
