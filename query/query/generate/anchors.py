@@ -44,6 +44,8 @@ def fetch_anchors(pg, chunk_ids: list[str]) -> dict[str, Citation]:
             page_end=c.page_end,
             version=dv.issue_date.isoformat() if dv and dv.issue_date else None,
             status=dv.version_status if dv else None,
+            source_code=c.source_code,  # DM LAW_CONTENT.CODE(Java 回查键;CP-010)
+            source_doc_id=dv.source_doc_id if dv else None,
         )
     return out
 

@@ -28,7 +28,8 @@ def _parse_sse(text):
 
 
 def _cand(cid, score):
-    return Candidate(cid, score, "P-INT", "DV1", "1/1", 1, False, "hybrid")
+    return Candidate(cid, score, "P-INT", "DV1", "1/1", 1, False, "hybrid",
+                     source_code=f"LC-{cid}", source_doc_id=f"LB-{cid}")
 
 
 class _Agent:
@@ -129,9 +130,12 @@ def test_boundary_sse_maps_query_result_to_five_event_vocab(monkeypatch):
         "ai_label": True, "review_required": False, "export_enabled": True,
     }
     assert data["delta"] == {"block_seq": 0, "block_type": "text", "text": "答复"}
-    # 轻量引用:只回 clause_id/chunk_id/score,不泄 doc_title/page/version 等 PG 回查字段。
-    # score 来自 ask 同一次检索的 collector(c1=0.9 为 max → 1.0),非二次检索。
-    assert data["citation"] == {"clause_id": "c1", "chunk_id": "c1", "score": 1.0}
+    # 轻量引用:clause_id/chunk_id/score + DM 回查键 source_code/source_doc_id(取自候选=Milvus hit,
+    # 非 PG 回查);不泄 doc_title/page/version 等 PG 展示字段。score 来自 collector(c1=0.9 max→1.0)。
+    assert data["citation"] == {
+        "clause_id": "c1", "chunk_id": "c1", "score": 1.0,
+        "source_code": "LC-c1", "source_doc_id": "LB-c1",  # CP-010:DM CODE 随候选流到帧
+    }
     assert data["done"] == {"finish_reason": "stop", "confidence": 0.8, "exhausted_scope": []}
     assert svc.agent.calls[0]["trace_id"] == "REQ-1"
 

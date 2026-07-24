@@ -120,6 +120,8 @@ class Candidate:
     retrieval_mode: str  # hybrid | dense_only(命中所在分区的检索模式)
     text: str | None = None  # §5.5 Milvus 截断 text(仅 with_text 检索-重排一跳填;默认 None)
     rerank_score: float | None = None  # 重排器相关性绝对分(仅 rerank 开时填;RRF 融合分见 score)
+    source_code: str | None = None  # DM LAW_CONTENT.CODE(Java 回查达梦键;非 DM 源/弃锚为空)
+    source_doc_id: str | None = None  # DM LAW_BASIC.CODE(文档级)
 
 
 def _to_candidate(hit: dict, mode: str) -> Candidate:
@@ -133,6 +135,8 @@ def _to_candidate(hit: dict, mode: str) -> Candidate:
         degraded=bool(hit.get("degraded")),
         retrieval_mode=mode,
         text=hit.get("text"),  # with_text=False 时 None(rerank=none 路径无开销)
+        source_code=hit.get("source_code"),  # DM 回查键(Milvus hit 携带;CP-010)
+        source_doc_id=hit.get("source_doc_id"),
     )
 
 

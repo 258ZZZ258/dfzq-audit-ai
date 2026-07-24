@@ -26,6 +26,8 @@ _EXPECTED_FIELDS = [
     ("entity_type", DataType.ARRAY),
     ("chunk_type", DataType.VARCHAR),
     ("clause_path", DataType.VARCHAR),
+    ("source_code", DataType.VARCHAR),  # CP-010 citation:DM 回查键(merge feat/citation-source-code)
+    ("source_doc_id", DataType.VARCHAR),
     ("page_start", DataType.INT64),
     ("effective_date", DataType.INT64),
     ("text", DataType.VARCHAR),

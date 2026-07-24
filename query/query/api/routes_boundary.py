@@ -118,12 +118,17 @@ def _stream_query(svc: QueryService, body: BoundaryQueryRequest, scope: dict):
             })
         if result.citations:
             score_map = _score_map(collected)
+            src_map = _source_map(collected)
             for citation in result.citations:
-                # 轻量引用:clause_id(=chunk_id,回查主键)+ score;绝不带 PG 回查字段
+                # 轻量引用:clause_id(=chunk_id)+ score + DM 回查键(source_code/source_doc_id,
+                # 取自本次检索候选=Milvus hit,不新增 PG 回查);Java 按 source_code 回查达梦四级引用。
+                src = src_map.get(citation.clause_id, {})
                 yield format_sse("citation", {
                     "clause_id": citation.clause_id,
                     "chunk_id": citation.clause_id,
                     "score": score_map.get(citation.clause_id),
+                    "source_code": src.get("source_code"),  # LAW_CONTENT.CODE;非 DM/弃锚→null
+                    "source_doc_id": src.get("source_doc_id"),  # LAW_BASIC.CODE
                 })
         yield format_sse("done", {
             "finish_reason": "refused" if result.route_type is RouteType.REFUSE else "stop",
@@ -133,6 +138,20 @@ def _stream_query(svc: QueryService, body: BoundaryQueryRequest, scope: dict):
     except Exception:
         # 500 语义:不泄内部细节(堆栈进日志/trace);码在契约 B1xx 服务向段(见 _ERR_INTERNAL)
         yield format_sse("error", {"code": _ERR_INTERNAL, "message": "生成失败"})
+
+
+def _source_map(candidates: list) -> dict[str, dict]:
+    """候选(collector,Milvus hit 携带)→ ``chunk_id → {source_code, source_doc_id}``(DM 回查键)。
+
+    取自本次检索候选(**不新增 PG 回查**);非 DM 源 / 超256弃锚 → ``None``,Java 侧当缺失回落。
+    """
+    out: dict[str, dict] = {}
+    for c in candidates:
+        out[c.chunk_id] = {
+            "source_code": getattr(c, "source_code", None) or None,
+            "source_doc_id": getattr(c, "source_doc_id", None) or None,
+        }
+    return out
 
 
 def _score_map(candidates: list) -> dict[str, float]:
