@@ -6,13 +6,25 @@
 
 from __future__ import annotations
 
-from pymilvus import CollectionSchema, DataType, FieldSchema
+from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType
 
 #: BAAI/bge-m3 dense 维度(由模型决定,非 ⚠ 可调)
 DENSE_DIM = 1024
 
 
-def audit_corpus_schema() -> CollectionSchema:
+def audit_corpus_schema(
+    sparse_backend: str = "bge", *, analyzer_type: str = "chinese"
+) -> CollectionSchema:
+    """audit_corpus schema(§8.2)。``sparse_backend``(CP-012)决定稀疏通道形态。
+
+    - ``bge``(默认):``sparse_vec`` 客户端写,``text`` 无 analyzer —— 与现状 byte 等价。
+    - ``bm25``:``text`` 开 analyzer + 挂 ``Function(BM25)`` 产 ``sparse_vec``
+      (Milvus 侧产,摄取端不写;适配 vLLM only-dense)。字段全集不变(§8.2)。
+    """
+    bm25 = sparse_backend == "bm25"
+    text_kwargs = (
+        {"enable_analyzer": True, "analyzer_params": {"type": analyzer_type}} if bm25 else {}
+    )
     fields = [
         FieldSchema("chunk_id", DataType.VARCHAR, is_primary=True, max_length=24),
         FieldSchema("dense_vec", DataType.FLOAT_VECTOR, dim=DENSE_DIM),
@@ -51,7 +63,17 @@ def audit_corpus_schema() -> CollectionSchema:
         FieldSchema("source_doc_id", DataType.VARCHAR, max_length=64),
         FieldSchema("page_start", DataType.INT64),  # 四级引用:页码
         FieldSchema("effective_date", DataType.INT64),  # yyyymmdd 时间窗过滤
-        FieldSchema("text", DataType.VARCHAR, max_length=2000),  # 检索-重排一跳;展示一律回查 PG
+        FieldSchema("text", DataType.VARCHAR, max_length=2000, **text_kwargs),  # 一跳;回查 PG
         FieldSchema("degraded", DataType.BOOL),
     ]
-    return CollectionSchema(fields, description="审计语料库 audit_corpus(dense+sparse)")
+    schema = CollectionSchema(fields, description="审计语料库 audit_corpus(dense+sparse)")
+    if bm25:  # Milvus 原生 BM25:从 text analyzer 产 sparse_vec(摄取端不写该字段)
+        schema.add_function(
+            Function(
+                name="text_bm25",
+                function_type=FunctionType.BM25,
+                input_field_names=["text"],
+                output_field_names=["sparse_vec"],
+            )
+        )
+    return schema

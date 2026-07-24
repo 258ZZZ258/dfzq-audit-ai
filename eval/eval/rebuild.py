@@ -34,7 +34,9 @@ def run_rebuild(ctx: StageContext) -> RebuildResult:
     # ① drop 前先全量组装(零编码反序列化):缺失/损坏在此暴露,Milvus 仍完好
     pending = []  # [(dvid, rows)],仅含冷备齐全、有可回灌块的 doc
     for dvid in ctx.db.chunk_doc_version_ids():
-        rows = corpus_rows.rows_from_cold(ctx.db, dvid)  # status=None → 按存储 status 还原
+        rows = corpus_rows.rows_from_cold(
+            ctx.db, dvid, sparse_backend=ctx.config.embedding.sparse_backend
+        )  # status=None → 按存储 status 还原
         if rows:
             pending.append((dvid, rows))
     # ② 组装无误 → drop + 重建空集合 + 纯 insert 重灌

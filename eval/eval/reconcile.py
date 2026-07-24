@@ -28,14 +28,20 @@ def run_reconcile(ctx: StageContext, doc_version_ids: list[str]) -> ReconcileRes
     per_doc: list[dict] = []
     consistent = True
     for dvid in doc_version_ids:
-        pg_n = len(corpus_rows.reloadable_chunks(ctx.db, dvid))  # 应有投影:非 parent 且冷备齐全
+        pg_n = len(
+            corpus_rows.reloadable_chunks(
+                ctx.db, dvid, sparse_backend=ctx.config.embedding.sparse_backend
+            )
+        )  # 应有投影:非 parent 且冷备齐全
         m_n = ctx.milvus.count(dvid)  # query-by-PK,准确
         rec: dict = {"dvid": dvid, "pg": pg_n, "milvus": m_n, "reconciled": False}
         if pg_n != m_n:
             rec["error_code"] = E_RECONCILE_MISMATCH
             ctx.milvus.delete(dvid)  # 以 PG 为准:清旧投影
             ctx.milvus.flush()
-            rows = corpus_rows.rows_from_cold(ctx.db, dvid)  # status=None → 保各块原状态
+            rows = corpus_rows.rows_from_cold(
+                ctx.db, dvid, sparse_backend=ctx.config.embedding.sparse_backend
+            )  # status=None → 保各块原状态
             if rows:
                 ctx.milvus.upsert(rows)
                 ctx.milvus.flush()

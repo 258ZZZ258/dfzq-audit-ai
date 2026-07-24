@@ -41,7 +41,10 @@ def test_rerank_none_equivalent_real(indexed_stack):
 def test_rerank_bge_hop_real_text(indexed_stack):
     # rerank=bge + 注入反转 fake reranker:候选带真 Milvus text + reranker 真应用(无需本地模型)
     qcfg = load_query_config().model_copy(update={"rerank_backend": "bge"})
-    rev = SimpleNamespace(rerank=lambda q, cands: list(reversed(cands)))
+    rev = SimpleNamespace(
+        rerank=lambda q, cands: list(reversed(cands)),
+        rerank_scored=lambda q, cands: [(c, 0.5) for c in reversed(cands)],
+    )
     bge_out = _retriever(indexed_stack, qcfg, reranker=rev).retrieve(indexed_stack.query)
     assert bge_out, "应检索到条款"
     assert any(c.text for c in bge_out), "with_text=True → 候选带真 Milvus 截断 text(检索-重排一跳)"

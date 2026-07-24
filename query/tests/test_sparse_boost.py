@@ -196,7 +196,7 @@ def _embed():
 
 def _milvus(cap):
     def _search(dense, sparse, *, topk, include_superseded=False, corpus=None,
-                extra_expr=None, with_text=False):
+                extra_expr=None, with_text=False, query_text=None):
         cap.append({"dense": dense, "sparse": sparse})
         return SimpleNamespace(hits=[], retrieval_mode="hybrid")
     return SimpleNamespace(search=_search)

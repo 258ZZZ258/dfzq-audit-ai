@@ -13,6 +13,10 @@ collection = "audit_corpus"
 hnsw_m = 16                     # ⚠ HNSW M
 hnsw_ef_construction = 200      # ⚠ HNSW efConstruction
 upsert_batch = 500              # ⚠ 批量 upsert 条数
+# ── BM25 全文检索(CP-012;仅 embedding.sparse_backend="bm25" 生效)──
+# bm25_analyzer_type = "chinese"  # ⚠ Milvus analyzer(中文 jieba)
+# bm25_k1 = 1.2                   # ⚠ BM25 k1
+# bm25_b = 0.75                   # ⚠ BM25 b
 
 [embedding]
 # env 覆盖:PIPELINE_EMBEDDING_MODE / PIPELINE_EMBEDDING_BASE_URL(优先)/ OPENAI_BASE_URL /
@@ -22,6 +26,7 @@ model_name = "BAAI/bge-m3"
 batch_size = 64                 # ⚠(endpoint 模式:每请求 input 条数)
 max_length = 1024               # ⚠(仅 local 分词截断;endpoint 由服务端处理)
 retries = 3                     # ⚠ 指数退避次数
+# sparse_backend = "bge"        # bge(BGE-M3 lexical,默认)| bm25(Milvus 原生 BM25,vLLM only-dense)| none;env PIPELINE_SPARSE_BACKEND
 # ── mode="endpoint" 时的 BGE 系远程契约(字段可配以适配 TEI/Xinference/vLLM;base_url/key 走 env)──
 endpoint_path = "/embeddings"        # ⚠ base_url 后拼接路径
 # endpoint_model = "bge-m3"          # ⚠ 网关注册名;缺省回落 model_name

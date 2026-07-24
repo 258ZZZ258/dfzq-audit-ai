@@ -279,6 +279,7 @@ class Retriever:
                 corpus=corpus,
                 extra_expr=extra_expr,
                 with_text=with_text,
+                query_text=query,  # CP-012:bm25 走 query 原文;bge 忽略(byte 等价)
             )
             for hit in res.hits:
                 cand = _to_candidate(hit, res.retrieval_mode)
@@ -336,6 +337,7 @@ class Retriever:
                 include_superseded=include_superseded,
                 corpus=corpus,
                 extra_expr=extra_expr,
+                query_text=query,  # CP-012:bm25 走 query 原文;bge 忽略(byte 等价)
             )
             for hit in res.hits:
                 cand = _to_candidate(hit, res.retrieval_mode)
@@ -366,6 +368,7 @@ class Retriever:
             include_superseded=include_superseded,
             corpus="P-CASE",
             extra_expr=scope.extra_expr if scope else None,
+            query_text=query,  # CP-012:bm25 走 query 原文;bge 忽略(byte 等价)
         )
         cands = [_to_candidate(hit, res.retrieval_mode) for hit in res.hits]
         out = sorted(cands, key=lambda c: c.score, reverse=True)

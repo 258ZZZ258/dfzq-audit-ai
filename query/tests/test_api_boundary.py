@@ -255,6 +255,7 @@ def test_retriever_scope_threads_filter_to_milvus_and_resets():
         "corpus": "P-INT",
         "extra_expr": 'array_contains_any(perm_tag, ["内部"])',
         "with_text": False,
+        "query_text": "q",           # CP-012:bm25 词法通道用 query 原文(bge 忽略)
     }]
     # 退出 scope 复位:回到既有双分区、无 extra_expr(byte 等价)
     retriever.retrieve("q")

@@ -32,6 +32,10 @@ class MilvusConfig(BaseModel):
     hnsw_m: int
     hnsw_ef_construction: int
     upsert_batch: int  # ⚠ 批量 upsert 条数
+    # ── BM25 全文检索参数(CP-012;仅 embedding.sparse_backend="bm25" 生效)──
+    bm25_analyzer_type: str = "chinese"  # ⚠ Milvus analyzer(中文 jieba;发文字号切词达标性 T8 验证)
+    bm25_k1: float = 1.2  # ⚠ BM25 k1(Milvus 缺省;V0 标定)
+    bm25_b: float = 0.75  # ⚠ BM25 b(Milvus 缺省;V0 标定)
 
 
 class EmbeddingConfig(BaseModel):
@@ -40,6 +44,9 @@ class EmbeddingConfig(BaseModel):
     batch_size: int  # ⚠(endpoint 模式:每请求 input 条数)
     max_length: int  # ⚠(仅 local 分词截断;endpoint 由服务端处理)
     retries: int  # ⚠ 指数退避次数(local/endpoint 共用)
+    # 稀疏通道后端(CP-012):bge=BGE-M3 lexical(默认现状)|
+    # bm25=Milvus 原生 BM25 | none=纯 dense。env PIPELINE_SPARSE_BACKEND;非法值 fail-fast。
+    sparse_backend: Literal["bge", "bm25", "none"] = "bge"
     cache_dir: str | None = None  # HF_HOME(env 注入,离线缓存)
     # ── endpoint 模式(BGE 系远程 dense+sparse 契约;字段/路径可配以适配 TEI/Xinference/vLLM 等)──
     # base_url/api_key 走 env(内网嵌入服务常与 LLM 服务分离:PIPELINE_EMBEDDING_BASE_URL 优先)。
@@ -159,6 +166,8 @@ def _apply_env(raw: dict) -> None:
     emb = raw["embedding"]
     if "PIPELINE_EMBEDDING_MODE" in env:
         emb["mode"] = env["PIPELINE_EMBEDDING_MODE"]
+    if "PIPELINE_SPARSE_BACKEND" in env:  # 稀疏通道后端(CP-012:bge|bm25|none)
+        emb["sparse_backend"] = env["PIPELINE_SPARSE_BACKEND"]
     if "PIPELINE_EMBEDDING_MODEL" in env:  # 指向本地模型目录(离线/镜像下载场景,如信创目标)
         emb["model_name"] = env["PIPELINE_EMBEDDING_MODEL"]
     if "OPENAI_BASE_URL" in env:

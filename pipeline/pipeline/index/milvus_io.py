@@ -90,8 +90,8 @@ def _sparse_for_milvus(sparse: dict) -> dict[int, float]:
     return {int(k): float(v) for k, v in sparse.items()}
 
 
-def _to_milvus_dict(r: CorpusRow) -> dict:
-    return {
+def _to_milvus_dict(r: CorpusRow, *, bm25: bool = False) -> dict:
+    d = {
         "chunk_id": r.chunk_id,
         "dense_vec": r.dense,
         "sparse_vec": _sparse_for_milvus(r.sparse),
@@ -113,6 +113,9 @@ def _to_milvus_dict(r: CorpusRow) -> dict:
         "source_code": r.source_code,
         "source_doc_id": r.source_doc_id,
     }
+    if bm25:  # BM25 function 从 text 产 sparse_vec;摄取端不写(否则 Milvus 拒插 function 输出字段)
+        del d["sparse_vec"]
+    return d
 
 
 def _hits(res, fields: list[str] = _OUTPUT_FIELDS) -> list[dict]:
@@ -129,6 +132,7 @@ def _hits(res, fields: list[str] = _OUTPUT_FIELDS) -> list[dict]:
 class MilvusIO:
     def __init__(self, settings: Settings) -> None:
         self.cfg = settings.milvus
+        self.sparse_backend = settings.embedding.sparse_backend  # CP-012:bge|bm25|none
 
     def connect(self) -> None:
         connections.connect(alias=_ALIAS, host=self.cfg.host, port=str(self.cfg.port))
@@ -137,8 +141,11 @@ class MilvusIO:
         connections.disconnect(_ALIAS)
 
     def schema(self) -> CollectionSchema:
-        """audit_corpus collection schema —— 契约定义在 common.milvus_schema(只搬位置,值不变)。"""
-        return audit_corpus_schema()
+        """audit_corpus collection schema —— 契约定义在 common.milvus_schema(只搬位置,值不变)。
+
+        CP-012:``sparse_backend=bm25`` 时 text 开 analyzer + 挂 BM25 function;bge/none 为现状形态。
+        """
+        return audit_corpus_schema(self.sparse_backend, analyzer_type=self.cfg.bm25_analyzer_type)
 
     def create_collection(self, *, drop_existing: bool = False) -> Collection:
         """建 audit_corpus + 索引(dense=HNSW/COSINE,sparse=SPARSE_INVERTED_INDEX/IP)。
@@ -160,10 +167,17 @@ class MilvusIO:
                 "params": {"M": self.cfg.hnsw_m, "efConstruction": self.cfg.hnsw_ef_construction},
             },
         )
-        col.create_index(
-            "sparse_vec",
-            {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"},
+        # bm25:BM25 metric + k1/b(Milvus 原生全文检索);bge/none:IP(客户端稀疏向量,现状 byte 等价)
+        sparse_index = (
+            {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "BM25",
+                "params": {"bm25_k1": self.cfg.bm25_k1, "bm25_b": self.cfg.bm25_b},
+            }
+            if self.sparse_backend == "bm25"
+            else {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"}
         )
+        col.create_index("sparse_vec", sparse_index)
         col.load()
         return col
 
@@ -188,9 +202,10 @@ class MilvusIO:
         if not rows:
             return 0
         bs = batch_size or self.cfg.upsert_batch
+        bm25 = self.sparse_backend == "bm25"  # bm25:剔除 sparse_vec(Milvus function 从 text 产)
         col = self._collection()
         for i in range(0, len(rows), bs):
-            col.upsert([_to_milvus_dict(r) for r in rows[i : i + bs]])
+            col.upsert([_to_milvus_dict(r, bm25=bm25) for r in rows[i : i + bs]])
         return len(rows)
 
     def flush(self) -> None:
@@ -221,7 +236,8 @@ class MilvusIO:
         """
         probe_dense = [0.0] * DENSE_DIM
         probe_dense[0] = 1.0  # 非零向量(COSINE 需 norm≠0)
-        return self.search(probe_dense, {"0": 1.0}, topk=1).retrieval_mode
+        # query_text 供 bm25 探测走 hybrid 路径(bge 忽略该参 → byte 等价)
+        return self.search(probe_dense, {"0": 1.0}, topk=1, query_text="probe").retrieval_mode
 
     def search(
         self,
@@ -233,6 +249,7 @@ class MilvusIO:
         corpus: str | None = None,
         extra_expr: str | None = None,
         with_text: bool = False,
+        query_text: str | None = None,
     ) -> SearchResult:
         """混合查(dense+sparse + RRFRanker);hybrid 失败或 sparse 空 → dense-only 兜底 + 标记。
 
@@ -261,21 +278,30 @@ class MilvusIO:
         expr = " and ".join(clauses)
         out_fields = [*_OUTPUT_FIELDS, "text"] if with_text else _OUTPUT_FIELDS
 
+        # 稀疏请求分形态(CP-012):bm25=传 query 原文(Milvus 分词算 BM25)| bge=传客户端稀疏向量(IP);
+        # none / 缺稀疏输入 → 纯 dense 兜底(不静默:retrieval_mode 标 dense_only)。
         try:
-            if not sparse:
-                raise ValueError("空 sparse,转 dense-only")
-            reqs = [
-                AnnSearchRequest(
-                    [dense], "dense_vec", {"metric_type": "COSINE", "params": {}},
-                    limit=topk, expr=expr,
-                ),
-                AnnSearchRequest(
+            dense_req = AnnSearchRequest(
+                [dense], "dense_vec", {"metric_type": "COSINE", "params": {}},
+                limit=topk, expr=expr,
+            )
+            if self.sparse_backend == "bm25":
+                if not query_text:
+                    raise ValueError("bm25 检索缺 query_text,转 dense-only")
+                sparse_req = AnnSearchRequest(
+                    [query_text], "sparse_vec", {"metric_type": "BM25"}, limit=topk, expr=expr,
+                )
+            elif self.sparse_backend == "none":
+                raise ValueError("sparse_backend=none,纯 dense")
+            else:
+                if not sparse:
+                    raise ValueError("空 sparse,转 dense-only")
+                sparse_req = AnnSearchRequest(
                     [_sparse_for_milvus(sparse)], "sparse_vec", {"metric_type": "IP", "params": {}},
                     limit=topk, expr=expr,
-                ),
-            ]
+                )
             res = col.hybrid_search(
-                reqs, RRFRanker(), limit=topk,
+                [dense_req, sparse_req], RRFRanker(), limit=topk,
                 output_fields=out_fields, consistency_level="Strong",
             )
             return SearchResult(_hits(res, out_fields), "hybrid", expr)
