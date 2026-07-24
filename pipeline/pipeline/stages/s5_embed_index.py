@@ -38,11 +38,15 @@ def embed(ctx: StageContext, doc_version_id: str) -> StageResult:
     """EMBEDDING:嵌入非 parent 块 → 冷备写 PG → Milvus upsert(staging)→ INDEXING。"""
     chunks = indexable_chunks(ctx.db, doc_version_id)
     if chunks:
+        sb = ctx.config.embedding.sparse_backend
         embs = ctx.embedding.embed([c.text for c in chunks])
-        guard_sparse_backend(ctx.config.embedding.sparse_backend, chunks, embs)
+        guard_sparse_backend(sb, chunks, embs)
         ctx.db.write_cold_vectors(
             {
-                c.chunk_id: (dense_to_bytes(e.dense), sparse_to_bytes(e.sparse))
+                # bm25/none:sparse 免冷存(Milvus BM25 从 text 重算),写 None
+                c.chunk_id: (
+                    dense_to_bytes(e.dense), sparse_to_bytes(e.sparse) if sb == "bge" else None
+                )
                 for c, e in zip(chunks, embs, strict=True)
             }
         )
@@ -64,7 +68,11 @@ def index(ctx: StageContext, doc_version_id: str) -> StageResult:
     chunks = indexable_chunks(ctx.db, doc_version_id)
     if chunks:  # 从 PG 冷备重建上线行 upsert(零重编码),按 chunk_id 覆盖 embed 的 staging upsert
         # 严格:任一块缺冷备即抛 → 文档不进 INDEXED(不可在缺投影下翻状态)。维护命令才用跳过式。
-        ctx.milvus.upsert(rows_from_cold_strict(ctx.db, doc_version_id, live))
+        ctx.milvus.upsert(
+            rows_from_cold_strict(
+                ctx.db, doc_version_id, live, sparse_backend=ctx.config.embedding.sparse_backend
+            )
+        )
         # ⚠ 单次 flush(原每件 2 次 → 1 次):上线态 upsert 覆盖 staging 后只 flush 一次——
         # count 校验(下)与 durability(flush-before-INDEXED)不变量都保,Milvus flush 压力减半,
         # 缓解 standalone 在批量 per-doc flush 下的 flush 积压卡死(根因)。

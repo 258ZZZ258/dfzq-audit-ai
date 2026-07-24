@@ -17,18 +17,22 @@ def indexable_chunks(db: PgIO, dvid: str) -> list[Chunk]:
     return [c for c in db.get_chunks(dvid) if not c.is_parent]
 
 
-def reloadable_chunks(db: PgIO, dvid: str) -> list[Chunk]:
-    """可从冷备零编码回灌的块:非 parent 且 dense/sparse 冷备齐全(已过 s5 嵌入)。
+def reloadable_chunks(db: PgIO, dvid: str, sparse_backend: str = "bge") -> list[Chunk]:
+    """可从冷备零编码回灌的块:非 parent 且冷备齐全(已过 s5 嵌入)。
 
-    s3 产出的块默认 ``chunk_status=staging`` 且 ``dense_vec_cold``/``sparse_vec_cold`` 为 None——
-    META_REVIEW 等未嵌入中间态正处此列:它们既不在 Milvus 投影、也无法零编码回灌。**必须排除**,
-    否则 ``rows_from_cold`` 对 None 反序列化直接崩(rebuild 若已 drop 集合则连带丢数据)。
-    故 reconcile / rebuild 的"应有投影 / 可回灌"判定都以本谓词为准,而非 ``indexable_chunks``。
+    s3 产出的块默认 ``chunk_status=staging`` 且 ``dense_vec_cold`` 为 None——META_REVIEW 等未嵌入
+    中间态正处此列:它们既不在 Milvus 投影、也无法零编码回灌。**必须排除**,否则 ``rows_from_cold``
+    对 None 反序列化直接崩(rebuild 若已 drop 集合则连带丢数据)。
+    ``bge`` 需 dense+sparse 冷备俱全;``bm25``/``none`` 只需 dense(sparse 由 Milvus BM25 从 text
+    重算、不冷存,CP-012)。reconcile/rebuild 的"应有投影/可回灌"判定以本谓词为准。
     """
+    need_sparse = sparse_backend == "bge"
     return [
         c
         for c in db.get_chunks(dvid)
-        if not c.is_parent and c.dense_vec_cold is not None and c.sparse_vec_cold is not None
+        if not c.is_parent
+        and c.dense_vec_cold is not None
+        and (not need_sparse or c.sparse_vec_cold is not None)
     ]
 
 
@@ -89,32 +93,48 @@ class ColdBackupIncomplete(RuntimeError):
         super().__init__(f"{dvid}:{len(missing)} 块冷备缺失,不可严格回灌(如 {missing[:3]})")
 
 
-def rows_from_cold(db: PgIO, dvid: str, status: str | None = None) -> list[CorpusRow]:
+def _cold_sparse(c: Chunk, sparse_backend: str) -> dict:
+    """bge:反序列化 sparse 冷备;bm25/none:{}(sparse 由 Milvus BM25 从 text 重算、不冷存,CP-012)。"""
+    return sparse_from_bytes(c.sparse_vec_cold) if sparse_backend == "bge" else {}
+
+
+def rows_from_cold(
+    db: PgIO, dvid: str, status: str | None = None, sparse_backend: str = "bge"
+) -> list[CorpusRow]:
     """**跳过式**回灌:仅取 ``reloadable_chunks``(冷备齐全),缺冷备的块跳过而非崩。
 
     供**维护命令**(reconcile / rebuild):尽力回灌,缺冷备的块由对账暴露,不该让维护操作崩。
     ``status=None``:按各 chunk 存储的 chunk_status 还原;S5/finalize 须用 ``rows_from_cold_strict``
     ——见其文档(跳过式会让缺冷备的块静默少返回一行,破坏「全块就绪才可见」契约)。
+    ``bm25/none``:sparse 免冷存,回灌行 sparse={}(upsert 剔除,Milvus 从 text 重算)。
     """
-    chunks = reloadable_chunks(db, dvid)
+    chunks = reloadable_chunks(db, dvid, sparse_backend)
     vectors = [
-        (dense_from_bytes(c.dense_vec_cold), sparse_from_bytes(c.sparse_vec_cold)) for c in chunks
+        (dense_from_bytes(c.dense_vec_cold), _cold_sparse(c, sparse_backend)) for c in chunks
     ]
     return build_rows(db, dvid, chunks, vectors, status)
 
 
-def rows_from_cold_strict(db: PgIO, dvid: str, status: str) -> list[CorpusRow]:
+def rows_from_cold_strict(
+    db: PgIO, dvid: str, status: str, sparse_backend: str = "bge"
+) -> list[CorpusRow]:
     """严格回灌:取全部 ``indexable_chunks``(非 parent),任一缺冷备即抛 ``ColdBackupIncomplete``。
 
     供 s5 INDEXING(翻 effective)与 finalize 版本切换(翻 superseded):保「PG 冷备完整、全块就绪
     才可见」契约——绝不静默少返回一行(那会让文档进 INDEXED 却缺 Milvus 投影,或旧版残留 effective)。
     缺冷备 → 抛错让调用方失败、可重试(修复冷备 / reprocess 重嵌入),而非放行半成品。
+    ``bge`` 校验 dense+sparse 冷备;``bm25``/``none`` 只校验 dense(sparse 免冷存)。
     """
     chunks = indexable_chunks(db, dvid)
-    missing = [c.chunk_id for c in chunks if c.dense_vec_cold is None or c.sparse_vec_cold is None]
+    need_sparse = sparse_backend == "bge"
+    missing = [
+        c.chunk_id
+        for c in chunks
+        if c.dense_vec_cold is None or (need_sparse and c.sparse_vec_cold is None)
+    ]
     if missing:
         raise ColdBackupIncomplete(dvid, missing)
     vectors = [
-        (dense_from_bytes(c.dense_vec_cold), sparse_from_bytes(c.sparse_vec_cold)) for c in chunks
+        (dense_from_bytes(c.dense_vec_cold), _cold_sparse(c, sparse_backend)) for c in chunks
     ]
     return build_rows(db, dvid, chunks, vectors, status)

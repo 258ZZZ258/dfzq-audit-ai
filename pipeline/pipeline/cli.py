@@ -797,7 +797,10 @@ def activate(
     pg.set_chunk_status(doc_version_id, "effective")
     if ctx.milvus is not None:
         try:
-            rows = corpus_rows.rows_from_cold_strict(pg, doc_version_id, "effective")
+            rows = corpus_rows.rows_from_cold_strict(
+                pg, doc_version_id, "effective",
+                sparse_backend=ctx.config.embedding.sparse_backend,
+            )
         except ColdBackupIncomplete as e:
             typer.echo(f"✗ 上线失败(冷备缺失,可重试):{e}")
             raise typer.Exit(1) from e

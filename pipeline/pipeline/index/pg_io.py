@@ -147,8 +147,11 @@ class PgIO:
             s.execute(delete(Chunk).where(Chunk.doc_version_id == doc_version_id))
             s.add_all(chunks)
 
-    def write_cold_vectors(self, updates: dict[str, tuple[bytes, bytes]]) -> None:
-        """写 chunks 冷备向量:``{chunk_id: (dense_bytes, sparse_bytes)}``(s5 embed 阶段)。"""
+    def write_cold_vectors(self, updates: dict[str, tuple[bytes, bytes | None]]) -> None:
+        """写 chunks 冷备向量:``{chunk_id: (dense_bytes, sparse_bytes|None)}``(s5 embed 阶段)。
+
+        ``sparse_bytes=None``:bm25/none 后端 sparse 免冷存(Milvus BM25 从 text 重算,CP-012)。
+        """
         with self.session() as s:
             for chunk_id, (dense_b, sparse_b) in updates.items():
                 c = s.get(Chunk, chunk_id)

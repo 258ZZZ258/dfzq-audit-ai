@@ -90,3 +90,16 @@ def test_search_bm25_missing_query_text_falls_back_dense_only(bm25_milvus):
     bm25_milvus.flush()
     res = bm25_milvus.search(DENSE, {}, topk=5, corpus="P-INT", query_text=None)
     assert res.retrieval_mode == "dense_only"  # bm25 缺 query_text → 兜底(不静默)
+
+
+def test_bm25_rebuild_recomputes_from_text(bm25_milvus):
+    """rebuild(drop+重建+从 text 重灌)后 Milvus 重算 BM25,发文字号召回不变(sparse 免冷存)。"""
+    rows = [_row("c1", "证监会公告第十五号 关于处罚标准"), _row("c2", "内部控制基本规范")]
+    bm25_milvus.upsert(rows)
+    bm25_milvus.flush()
+    bm25_milvus.create_collection(drop_existing=True)  # rebuild:drop + 重建空集合
+    bm25_milvus.upsert(rows)  # 从"冷备行"(text 齐)重灌;rows 的 sparse 被 upsert 丢弃,Milvus 重算
+    bm25_milvus.flush()
+    res = bm25_milvus.search(DENSE, {}, topk=5, corpus="P-INT", query_text="证监会公告第十五号")
+    assert res.retrieval_mode == "hybrid"
+    assert [h["chunk_id"] for h in res.hits][0] == "c1"  # 重算 BM25 后精确命中不变
