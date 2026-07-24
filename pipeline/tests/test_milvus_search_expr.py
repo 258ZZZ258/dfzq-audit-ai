@@ -28,6 +28,7 @@ class _FakeCollection:
 @pytest.fixture
 def mio(monkeypatch):
     m = MilvusIO.__new__(MilvusIO)  # 不连真栈;search 只用 _collection()
+    m.sparse_backend = "bge"  # __new__ 绕过 __init__,补 search 依赖属性(CP-012)
     fake = _FakeCollection()
     monkeypatch.setattr(m, "_collection", lambda: fake)
     return m, fake

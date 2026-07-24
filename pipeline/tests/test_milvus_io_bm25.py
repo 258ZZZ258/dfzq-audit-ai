@@ -71,3 +71,22 @@ def test_bm25_upsert_without_client_sparse(bm25_milvus):
     bm25_milvus.flush()
     assert n == 2
     assert bm25_milvus.count("V1") == 2  # Milvus 接受无 sparse_vec 的插入(function 从 text 产)
+
+
+def test_search_bm25_hits_and_hybrid_mode(bm25_milvus):
+    bm25_milvus.upsert([
+        _row("c1", "证监会公告第十五号 关于处罚标准的规定"),
+        _row("c2", "企业内部控制基本规范"),
+    ])
+    bm25_milvus.flush()
+    res = bm25_milvus.search(DENSE, {}, topk=5, corpus="P-INT", query_text="证监会公告第十五号")
+    assert res.retrieval_mode == "hybrid"  # 走 BM25+dense,非 dense_only 兜底
+    ids = [h["chunk_id"] for h in res.hits]
+    assert ids[0] == "c1"  # 发文字号精确命中 → BM25 提分 → RRF 浮顶(dense 两行等分)
+
+
+def test_search_bm25_missing_query_text_falls_back_dense_only(bm25_milvus):
+    bm25_milvus.upsert([_row("c1", "内部控制"), _row("c2", "风险管理")])
+    bm25_milvus.flush()
+    res = bm25_milvus.search(DENSE, {}, topk=5, corpus="P-INT", query_text=None)
+    assert res.retrieval_mode == "dense_only"  # bm25 缺 query_text → 兜底(不静默)

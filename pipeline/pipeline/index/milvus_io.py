@@ -231,7 +231,8 @@ class MilvusIO:
         """
         probe_dense = [0.0] * DENSE_DIM
         probe_dense[0] = 1.0  # 非零向量(COSINE 需 norm≠0)
-        return self.search(probe_dense, {"0": 1.0}, topk=1).retrieval_mode
+        # query_text 供 bm25 探测走 hybrid 路径(bge 忽略该参 → byte 等价)
+        return self.search(probe_dense, {"0": 1.0}, topk=1, query_text="probe").retrieval_mode
 
     def search(
         self,
@@ -243,6 +244,7 @@ class MilvusIO:
         corpus: str | None = None,
         extra_expr: str | None = None,
         with_text: bool = False,
+        query_text: str | None = None,
     ) -> SearchResult:
         """混合查(dense+sparse + RRFRanker);hybrid 失败或 sparse 空 → dense-only 兜底 + 标记。
 
@@ -271,21 +273,30 @@ class MilvusIO:
         expr = " and ".join(clauses)
         out_fields = [*_OUTPUT_FIELDS, "text"] if with_text else _OUTPUT_FIELDS
 
+        # 稀疏请求分形态(CP-012):bm25=传 query 原文(Milvus 分词算 BM25)| bge=传客户端稀疏向量(IP);
+        # none / 缺稀疏输入 → 纯 dense 兜底(不静默:retrieval_mode 标 dense_only)。
         try:
-            if not sparse:
-                raise ValueError("空 sparse,转 dense-only")
-            reqs = [
-                AnnSearchRequest(
-                    [dense], "dense_vec", {"metric_type": "COSINE", "params": {}},
-                    limit=topk, expr=expr,
-                ),
-                AnnSearchRequest(
+            dense_req = AnnSearchRequest(
+                [dense], "dense_vec", {"metric_type": "COSINE", "params": {}},
+                limit=topk, expr=expr,
+            )
+            if self.sparse_backend == "bm25":
+                if not query_text:
+                    raise ValueError("bm25 检索缺 query_text,转 dense-only")
+                sparse_req = AnnSearchRequest(
+                    [query_text], "sparse_vec", {"metric_type": "BM25"}, limit=topk, expr=expr,
+                )
+            elif self.sparse_backend == "none":
+                raise ValueError("sparse_backend=none,纯 dense")
+            else:
+                if not sparse:
+                    raise ValueError("空 sparse,转 dense-only")
+                sparse_req = AnnSearchRequest(
                     [_sparse_for_milvus(sparse)], "sparse_vec", {"metric_type": "IP", "params": {}},
                     limit=topk, expr=expr,
-                ),
-            ]
+                )
             res = col.hybrid_search(
-                reqs, RRFRanker(), limit=topk,
+                [dense_req, sparse_req], RRFRanker(), limit=topk,
                 output_fields=out_fields, consistency_level="Strong",
             )
             return SearchResult(_hits(res, out_fields), "hybrid", expr)
