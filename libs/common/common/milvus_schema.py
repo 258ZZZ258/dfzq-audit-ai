@@ -45,6 +45,10 @@ def audit_corpus_schema() -> CollectionSchema:
         ),
         FieldSchema("chunk_type", DataType.VARCHAR, max_length=16),  # clause|table|qa|case_summary
         FieldSchema("clause_path", DataType.VARCHAR, max_length=512),  # 四级引用:条款路径
+        # DM 回查键(CP-010 preseg 透传):source_code=LAW_CONTENT.CODE(条/块级)、
+        # source_doc_id=LAW_BASIC.CODE(文档级);Java 按此回查达梦;非 DM/弃锚为空串。
+        FieldSchema("source_code", DataType.VARCHAR, max_length=256),
+        FieldSchema("source_doc_id", DataType.VARCHAR, max_length=64),
         FieldSchema("page_start", DataType.INT64),  # 四级引用:页码
         FieldSchema("effective_date", DataType.INT64),  # yyyymmdd 时间窗过滤
         FieldSchema("text", DataType.VARCHAR, max_length=2000),  # 检索-重排一跳;展示一律回查 PG

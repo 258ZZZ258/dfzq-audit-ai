@@ -58,6 +58,9 @@ class Citation:
     page_end: int | None = None
     version: str | None = None
     status: str | None = None  # effective | superseded | abolished
+    # DM 回查键(CP-010):Java 按此回查达梦拼四级引用。非 DM 源 / 超256弃锚为空。
+    source_code: str | None = None  # LAW_CONTENT.CODE(条/块级)
+    source_doc_id: str | None = None  # LAW_BASIC.CODE(文档级)
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +72,8 @@ class Citation:
             "page_end": self.page_end,
             "version": self.version,
             "status": self.status,
+            "source_code": self.source_code,
+            "source_doc_id": self.source_doc_id,
         }
 
 

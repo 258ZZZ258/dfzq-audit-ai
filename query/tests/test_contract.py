@@ -30,8 +30,10 @@ def test_citation_four_level_anchor_fields():
     assert set(d) == {
         "clause_id", "doc_title", "doc_no", "clause_path",
         "page_start", "page_end", "version", "status",
+        "source_code", "source_doc_id",  # CP-010:DM 回查键(add-only,未传→None)
     }
     assert d["clause_id"] == "abc" and d["page_start"] == 7 and d["status"] == "effective"
+    assert d["source_code"] is None and d["source_doc_id"] is None  # 默认 None,向后兼容
 
 
 def test_answer_block_shape_and_stream_default():
