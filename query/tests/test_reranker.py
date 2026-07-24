@@ -96,7 +96,7 @@ from query.retrieve.hybrid import Retriever  # noqa: E402
 
 def _fake_milvus(captured):
     def _search(dense, sparse, *, topk, include_superseded=False, corpus=None,
-                extra_expr=None, with_text=False):
+                extra_expr=None, with_text=False, query_text=None):
         captured["with_text"] = with_text
         if corpus == "P-INT":
             return SimpleNamespace(
