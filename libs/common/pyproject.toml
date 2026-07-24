@@ -14,8 +14,8 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",       # IR schema(§4.2)
     "sqlalchemy>=2.0",     # PG 表模型 ORM(§10)
-    "pymilvus>=2.4,<2.5",  # Milvus collection schema 定义(§8.2)
-    "setuptools>=68,<81",  # pymilvus 2.4 运行期需 pkg_resources(81+ 已移除)
+    "pymilvus>=2.5,<2.6",  # Milvus schema + BM25 Function(§8.2;CP-012 原生 BM25 需 2.5)
+    "setuptools>=68,<81",  # pymilvus 2.5 声明 setuptools>69;import 期已不拉 pkg_resources(CP-012 验),保守留 <81
 ]
 
 [tool.setuptools.packages.find]
