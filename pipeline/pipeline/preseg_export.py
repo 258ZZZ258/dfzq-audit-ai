@@ -52,9 +52,20 @@ class DmSource(Source):
         self._conn = conn
 
     def _rows(self, sql: str, **params: object) -> list[dict]:
+        """查询 → 行 dict,**键统一大写**。
+
+        转换层(``preseg/export.py``)按大写列名取值(``law.get("CODE")``)。达梦返回的键本就
+        大写,``upper()`` 对它幂等;但这层归一是必需的——键的大小写由驱动/方言决定,不是契约。
+        PostgreSQL 会把未加引号的标识符 fold 成小写,若不归一,所有 ``get("CODE")`` 静默返回
+        None,导出出一批字段全空却结构合法的批次(比报错更坏)。仿真源库(tools/mock_source)
+        正是走 PG 方言联调的。
+        """
         from sqlalchemy import text
 
-        return [dict(r._mapping) for r in self._conn.execute(text(sql), params)]
+        return [
+            {str(k).upper(): v for k, v in r._mapping.items()}
+            for r in self._conn.execute(text(sql), params)
+        ]
 
     def iter_laws(self) -> list[dict]:
         return self._rows(f"SELECT {_LAW_COLS} FROM ZNFG_IAM_LAW_BASIC WHERE {_ALIVE}")

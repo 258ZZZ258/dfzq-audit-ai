@@ -1,0 +1,30 @@
+# 甲方源库(达梦 DM8)仿真栈 —— PostgreSQL 16 冒充源端。
+#
+# 为什么是 PG 而不是达梦:①DmSource 的 SQL 无任何达梦特有语法(纯 SELECT/WHERE/ORDER BY),
+# PG 原样可跑;②SQLAlchemy 从 DSN 前缀推方言,把 PRESEG_SOURCE_DSN 指向本库即可端到端联调,
+# **preseg_export.py 零改**;③达梦官方镜像是 x86 且需注册下载,ARM Mac 跑不了。
+# 代价:方言差异不覆盖(ROWNUM、达梦日期返回型)——见 README「与真库的已知差异」。
+#
+# **独立 compose project + 独立端口 5434**:绝不与主栈(5432)/audit-demo 栈(5433)争用。
+# 起停不影响任何在跑的管线。
+name: audit-ai-mock-source
+
+services:
+  mock-source-pg:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dcetl
+      POSTGRES_PASSWORD: dcetl
+      POSTGRES_DB: dcetl
+    ports:
+      - "5434:5432"
+    volumes:
+      - mock_source_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dcetl -d dcetl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mock_source_data:

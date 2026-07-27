@@ -563,6 +563,9 @@ def search(
     result = ctx.milvus.search(
         emb.dense, emb.sparse, topk=topk,
         include_superseded=include_superseded, corpus=corpus_type,
+        # CP-012:bm25 后端的稀疏路要 query 原文(Milvus 侧分词算 BM25)。不传则每次静默退
+        # dense_only —— 稀疏通道形同虚设。bge 后端忽略本参数(走客户端稀疏向量),故无条件传。
+        query_text=query,
     )
     _print_search(pg, query, result)
 

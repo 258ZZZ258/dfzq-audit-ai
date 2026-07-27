@@ -49,6 +49,44 @@
   缺属性 → 在 try 内抛 → 被兜底吞成 dense_only(hybrid 断言假失败)。修:白盒 fixture 补 `m.sparse_backend="bge"` 镜像 __init__。
 - **setuptools 钉子**:pymilvus 2.5 import 期已不拉 `pkg_resources`(验),但仍声明 `setuptools>69` → 保守留 `<81`。
 
+## 2026-07-27 端到端实测(达梦 fake 库 → PG → Milvus,50 篇真语料)
+
+首次在**全链真栈**上跑 bm25 后端(此前只有单测 + T8 定向验证),暴露一个真缺陷 + 一条环境约束。
+
+### 缺陷:`demo search` 在 bm25 后端下恒退 dense-only(已修)
+
+`cli.py` 的 `search` 调 `ctx.milvus.search(dense, sparse, ...)` **没传 `query_text`** → bm25 分支
+`if not query_text: raise` → 被 `except Exception` 兜底吞成 `dense_only`。**稀疏通道形同虚设,且
+"不静默"的设计在这里没兜住**:retrieval_mode 确实标了 dense_only,但 CLI 输出里这行不显眼,
+实测前无人察觉。CP-012 实施时只改了 `hybrid.py`(query 侧三检索路),pipeline 侧 CLI 漏掉。
+修 = 无条件传 `query_text=query`(bge 后端忽略该参数,零影响)。
+
+> **教训**:配置缝加新后端时,把**所有调用点**列出来逐个过——只改"主路径"会留下静默降级的
+> 旁路。这类 bug 单测抓不到(单测直接调 `milvus_io.search` 并显式传参),只有全链实测能撞见。
+
+### 环境约束:模型门控测试与 `sparse_backend` 绑定,不可混跑
+
+`test_milvus_io.py` / `test_search_meta.py` 等假定 **bge schema 的 collection**(直接 upsert
+`sparse_vec`)。在 bm25 collection 上跑必红:`DataNotMatchException: Attempt to insert an
+unexpected function output field 'sparse_vec'` —— 即 §踩坑「function 输出字段不可 insert」的
+测试侧表现。**这不是回归**:2026-07-27 用 `git stash` 对照确认,基线与改动后同为 10 failed /
+4 passed,逐项一致。
+
+> 当前无 fixture 隔离(collection 名固定 `audit_corpus`,schema 由建库时的 backend 决定)。
+> **要跑全绿门控须先把 collection 建回 bge**(drop + `demo up`)。**待办**:给模型门控套件加
+> backend 感知(按 backend skip,或用带 backend 后缀的 collection 名),否则每次切后端跑门
+> 都要人工判断"这红是环境还是回归"。
+
+### 实测结果
+
+- **通道打通**:修后 `retrieval_mode=hybrid`;collection schema 带 `text_bm25` function
+  (`text→sparse_vec`)+ jieba analyzer;`sparse_vec_cold` 全 NULL(符合契约 delta:bm25 不冷存)。
+- **检索质量:本轮未验出优势,样本不足以下结论**。50 篇语料 / 3 个查询的对拍中,「要约收购」
+  「5.1.8」两组 bm25 与 dense-only 结果相当;**「权益分派」一组 bm25 反而更差**(第 2/3 名混入
+  「要约收购」「股份回购」,dense-only 三条全中权益分派)。疑因语料太小 IDF 不稳 + jieba 把
+  「权益分派」切成「权益」+「分派」召回噪声。**要评估质量须上大语料 + 正式评测集**
+  (参 audit-demo 回归套件 baseline_v1),不能拿这 3 条当结论。
+
 ## 留下切片 / 待办
 
 - **sparse_boost 的 BM25 版**(发文字号提权 + `dict_scenario_terms` 词典扩展):bge 版绑 BGE-M3 token 空间,bm25 下失效;
