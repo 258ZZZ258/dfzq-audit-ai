@@ -47,3 +47,53 @@
 - `issuer_level_src` → Milvus INT8 序:暂走既有字典派生,独立映射待值域(SPEC §9-2)。
 - 效力状态映射表值域 ⚠ 工程假设,真导出到手须校订(Ask-first 增删)。
 - 源库↔PG 拉取对账(D10 新增项)落在 puller 批次报告,随 T5.5。
+
+## 2026-07-27 源库仿真环境(`tools/mock_source/`)
+
+甲方源库(达梦)只在内网、只读账号未到手 → `DmSource` 那条 SQL 路径**从未连过任何库**
+(只有 `FakeSource` 单测)。建 PG 仿真替身把它跑起来,不必等账号。
+
+### 决策:PG 冒充达梦(否决达梦 docker)
+
+- ✅ **PG + 逐列复刻的 8 表**:`DmSource` 的 SQL 是纯 `SELECT/WHERE/ORDER BY`,无达梦特有构造
+  → 原样可跑;`create_engine` 从 DSN 前缀推方言 → 把 `PRESEG_SOURCE_DSN` 指向仿真库即可,
+  **preseg_export.py 的查询逻辑零改**。
+- ❌ **达梦官方 docker**:镜像 x86 且需注册下载,ARM Mac 跑不起来;为覆盖方言差异付不成比例的代价。
+  **代价记账**:方言/日期返回型/隔离级/性能(真库 36 倍规模,`contents_for` 是 N+1)这四类
+  仿真验不出,仍须内网真库验 —— 已写进 README「与真库的已知差异」,别把仿真绿当成真库绿。
+- ❌ **只造 fixtures 不建库**:那是既有 `FakeSource` 的覆盖面,验不到 SQL 层(列名大小写、
+  多语句 DDL、驱动行为)—— 而这次三个坑全在 SQL 层。
+
+### 口径钉子:仿真必须复刻"像 bug 的东西"
+
+真库那些反直觉形态(每逻辑节点 2 物理行、空串而非 NULL 的桥接锚、全空串的版本链字段、
+`CASE_PARTY` 0 行)**一律照抄**。掩盖任何一个,受它保护的代码路径(去重/冲突拒收、
+`= ''` vs `IS NULL`)在仿真上就永远走不到 → 仿真绿、真库炸。
+
+### 发现:`_COL_WIDTHS` 的边界有真/假之分
+
+把 `preseg/export.py` 的 `_COL_WIDTHS` 与源列宽对照后,部分 `_bound` 分支在真 schema 下
+**不可达**(源列比目标窄,越界数据造不出来):`title` 512 ← `NAME` 400、`source_code` 256
+← `LAW_CONTENT.CODE` 256(等宽)、`source_law_id` 256(等宽)。真正可达的是
+`sub_type` 32 ← `LEVELS` 4000、`issuer` 128 ← `ISSUE_AUTH_CN` 4000、`doc_number` 128 ← `DOC_NO` 2000。
+
+> ⚠ **待决(未在本次改动范围内)**:`LEVELS` 存的是 **JSON 数组串**(`["NATIONAL_LAWS"]`),
+> 被原样塞进 `sub_type`(列宽 32)。真库 17 部法规的 `LEVELS` 是多值组合(最长 79 字符)
+> → 按现行 fail-closed 口径**整件拒收**,占比 0.11%(17/15,305)。是"该解析数组元素再落库"
+> 还是"确认可拒收",属口径问题,需决策方拍板。`--edge-cases` 的 `levels-overflow` 样本已定向覆盖。
+
+### 踩坑(SQL 层,会再踩)
+
+- **`DmSource._rows` 隐含依赖大写列名**:转换层按 `law.get("CODE")` 取值;达梦返回大写键,
+  **PG 把未加引号标识符 fold 成小写** → 不归一则所有 `get("CODE")` 静默返回 None,
+  导出一批"字段全空但结构合法"的批次(比报错更坏)。已加 `{k.upper(): v}` 归一
+  (对达梦幂等)。键的大小写由驱动/方言决定,**不是契约**。
+- **psycopg 把 SQL 里的裸 `%` 当参数占位符**:`schema.sql` 注释里一个"100%"就让整份 DDL
+  报 `ProgrammingError: incomplete placeholder`。DDL 文件内避免裸百分号。
+- **SQLAlchemy `text()` 不收多语句**:多语句 DDL 走 `conn.exec_driver_sql()`(同时绕开
+  `text()` 对 `:` 的参数解析)。
+
+### 验收
+
+`tools/mock_source/verify.py` 一键跑通:造数 → 导出 → 断言 13 个定向边缘样本各自落对
+(7 拒收/跳过 + 6 通过且字段正确)+ 桥接锚落到 blocks/cases。随仿真数据或 export 口径漂移即红。
