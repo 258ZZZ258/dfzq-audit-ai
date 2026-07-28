@@ -4,6 +4,10 @@
 值域/分布造数,让 `pipeline/preseg_export.py` 的 `DmSource` 这条 SQL 路径**不必等内网只读账号**
 就能端到端联调。
 
+2026-07-28 起，造数器复刻真实正文落点：`ZNFG_IAM_LAW_CONTENT.CONTENT` 统一为空串，条款文本
+写入 `ZNFG_IAM_LAW_CONTENT_DETAIL.CONTENT`（`CONTENT_TYPE=0`、由 `LAW_CONTENT_CODE` 关联）。因此
+不能再用主表 `CONTENT` 的非空比例判断 mock 是否有可检索正文。
+
 ```bash
 # 起库(独立 compose project,端口 5434,不碰主栈 5432 / audit-demo 5433)
 docker compose -f tools/mock_source/compose.mock-source.yaml up -d
@@ -69,6 +73,7 @@ ETL 管道的产物或缺陷,而**没有任何材料能解释它们为什么长�
 | `PATH_CODE` 形态 | B1 | 点分祖先 CODE 路径,每段 opaque(`ELA7…`+3 位序号=39 字符);人类编号在 `TITLE` |
 | 桥接命中率 | C1 · I2 | 未命中 3,737,其中 **3,736 是空串锚**(`null_anchor=0`)、仅 1 条悬空 |
 | `PUNISH_LAW` 语义 | C2 | `PUNISH_LAW`=法规名、`PUNISH_LAW_TITLE`=条款标识,**与 dcetl 文档描述相反,以数据为准** |
+| 正文落点 | 2026-07-28 有效行统计 | `LAW_CONTENT.CONTENT` 445,477 行中 445,475 行为空；文本走 `LAW_CONTENT_DETAIL.CONTENT`（类型 0） |
 
 **表结构**(列名/类型/列宽)出自甲方机器上 `~/Documents/dcetl_schema_mermaid.md` 的照片
 (`东方/东方知识库/图片/IMG_1109–1123`)。⚠ 用户整理的 `知识库结构.md` 是**有损精简版**
@@ -133,6 +138,10 @@ ETL 管道的产物或缺陷,而**没有任何材料能解释它们为什么长�
    要优先测的。
 6. **内容真实性**:正文是模板生成的合成文本,不能用来评估切块质量、检索召回或条款树 F1。
    那类评估必须用真语料。
+7. **正文落点**:真实达梦在册 `LAW_CONTENT.CONTENT` 几乎全空，正文在
+   `LAW_CONTENT_DETAIL.CONTENT` 的 `CONTENT_TYPE=0` 分段中。转换逻辑已在主表正文为空时按
+   `LAW_CONTENT_CODE + CONTENT_ORDER` 回退拼接。当前 fixture 仍以主表合成正文为主；新增或重做
+   fixture 时必须保留至少一条“主表为空、详情多段乱序、含图片/删除段”的样本，不能只验证主表路径。
 
 ---
 

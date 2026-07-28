@@ -118,6 +118,20 @@ def test_ask_returns_structured_citations_meta_and_persists():
     assert assistant["hit_counts"]["clauses"] == 1
 
 
+def test_ask_returns_json_even_when_client_requests_event_stream():
+    c, svc = _client()
+    svc.store.create("C1")
+    r = c.post(
+        f"{_PREFIX}/conversations/C1/messages",
+        json={"query": "融资融券客户适当性依据"},
+        headers={"accept": "text/event-stream"},
+    )
+
+    assert r.status_code == 200
+    assert "application/json" in r.headers["content-type"]
+    assert r.json()["route_type"] == "evidence"
+
+
 def test_query_over_2000_returns_422():
     c, svc = _client()
     svc.store.create("C1")

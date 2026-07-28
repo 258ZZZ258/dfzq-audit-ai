@@ -29,6 +29,9 @@ _LAW_COLS = (
     "INVALID_DATE, STATUS_CODE, SOURCE_LAW_ID, LEVELS, TAG, CREATOR_ID, DEL_FLAG"
 )
 _CONTENT_COLS = "CODE, LAW_CODE, PATH_CODE, IS_CATALOG, TITLE, INDEX_NO, CONTENT, DEL_FLAG"
+_CONTENT_DETAIL_COLS = (
+    "ID, LAW_CODE, LAW_CONTENT_CODE, CONTENT_ORDER, CONTENT_TYPE, CONTENT, DEL_FLAG"
+)
 _CASE_COLS = (
     "CODE, NAME, DOC_NO, PUB_AUTH_CN, PUB_DATE, DOC_TYPE, EVENT_DATE, "
     "CASE_DESC, SUMMARY, URL, TAG, DEL_FLAG"
@@ -75,6 +78,20 @@ class DmSource(Source):
         return self._rows(
             f"SELECT {_CONTENT_COLS} FROM ZNFG_IAM_LAW_CONTENT WHERE LAW_CODE = :c AND {_ALIVE} "
             "ORDER BY INDEX_NO, CODE, ID",
+            c=law_code,
+        )
+
+    def content_details_for(self, law_code: str) -> list[dict]:
+        """读取条款详情文本段。
+
+        真实库有效 ``LAW_CONTENT`` 的正文几乎均为空；由转换层按
+        ``LAW_CONTENT_CODE`` + ``CONTENT_ORDER`` 将这里的 ``CONTENT_TYPE=0`` 文本回填。
+        图片、视频保留在源端但不进入当前纯文本检索契约。
+        """
+        return self._rows(
+            f"SELECT {_CONTENT_DETAIL_COLS} FROM ZNFG_IAM_LAW_CONTENT_DETAIL "
+            f"WHERE LAW_CODE = :c AND {_ALIVE} "
+            "ORDER BY LAW_CONTENT_CODE, CONTENT_ORDER, ID",
             c=law_code,
         )
 

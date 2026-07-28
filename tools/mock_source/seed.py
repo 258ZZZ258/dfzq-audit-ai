@@ -208,7 +208,11 @@ def _emit_node(rows: list[dict], rng: random.Random, law: dict, *, code_seq: int
 
 
 def gen_contents(rng: random.Random, laws: list[dict]) -> list[dict]:
-    """条款树行。**每个逻辑节点写 2 物理行**(同 CODE、异 ID)—— 复刻真库 G1/G2 现象。
+    """生成条款树行的中间形态；正文随后移动到详情表。
+
+    **每个逻辑节点写 2 个物理行**(同 CODE、异 ID)，复刻真库 G1/G2；调用
+    :func:`gen_content_details` 后，所有 ``LAW_CONTENT.CONTENT`` 都会变为空串，只有
+    ``LAW_CONTENT_DETAIL.CONTENT`` 承载正文。
 
     结构仿真数据 B1 样例:
       INDEX_NO=0  根节点(TITLE/CONTENT 空,IS_CATALOG=0)  PATH_CODE = 自身 CODE
@@ -253,6 +257,32 @@ def gen_contents(rng: random.Random, laws: list[dict]) -> list[dict]:
     return rows
 
 
+def gen_content_details(rng: random.Random, contents: list[dict]) -> list[dict]:
+    """把逻辑条款正文同步到详情表，并置空主表正文。
+
+    真达梦有效主表正文几乎全空；详情以 ``LAW_CONTENT_CODE`` 关联逻辑条款 CODE。主表的
+    两个重复物理行只生成一条文本详情，保持真实库的“主表重复不等于正文重复”形态。
+    """
+    details: list[dict] = []
+    seen_codes: set[str] = set()
+    for row in contents:
+        content = row["content"]
+        row["content"] = ""
+        code = row["code"]
+        if not content or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        details.append({
+            "etl_src_date": row["etl_src_date"], "etl_src_code": row["etl_src_code"],
+            "id": snowflake(rng), "law_code": row["law_code"], "law_content_code": code,
+            "content_order": 0, "content_type": 0, "content": content,
+            "create_time": row["create_time"], "creator_id": row["creator_id"],
+            "update_time": row["update_time"], "updator_id": row["updator_id"],
+            "del_flag": row["del_flag"], "data_version": row["data_version"],
+        })
+    return details
+
+
 #: 定向边缘样本(--edge-cases)。随机分布下罕见分支在小规模里抽不到:真库 15,305 部里
 #: 超宽 LEVELS 只有 17 部(0.1%),300 部的样本期望 0.3 部 —— 联调因此可能"全绿"却没碰过
 #: 拒收路径。每条 (key, 覆盖的分支, 字段覆写) 定向撞一个已知分支。
@@ -284,25 +314,35 @@ EDGE_LAWS = [
 ]
 
 
-def apply_content_edges(contents: list[dict], edge_codes: dict[str, str]) -> list[dict]:
-    """制造两个 LAW_CONTENT 侧边缘:①整部无正文;②同 CODE 双行内容冲突。
+def apply_content_edges(
+    contents: list[dict], content_details: list[dict], edge_codes: dict[str, str],
+) -> tuple[list[dict], list[dict]]:
+    """制造两个正文侧边缘:①整部无正文;②同条款详情文本冲突。
 
-    真库每个逻辑节点恒 2 行且内容一致,export.py 据此去重;若哪天源 ETL 产出不一致的两行,
-    去重就无法判定哪版权威 —— 那条路径必须有数据能走到,否则等于没实现。
+    正文已在详情表，不能再通过主表 ``CONTENT`` 制造冲突；同一条款同一顺序却不同正文同样
+    无法判权威，导出必须拒收。
     """
     no_content = edge_codes.get("no-content")
     conflict = edge_codes.get("content-conflict")
     out = [r for r in contents if r["law_code"] != no_content]
+    out_details = [r for r in content_details if r["law_code"] != no_content]
     if conflict:
-        seen: set[str] = set()
+        target_code = None
         for row in out:
-            if row["law_code"] != conflict or row["is_catalog"] or not row["content"]:
+            if row["law_code"] != conflict or row["is_catalog"]:
                 continue
-            if row["code"] in seen:            # 同 CODE 的第 2 物理行 → 改掉正文制造冲突
-                row["content"] += "(第二物理行内容不一致,人为制造的冲突样本)"
-                break
-            seen.add(row["code"])
-    return out
+            target_code = row["code"]
+            break
+        for detail in out_details:
+            if detail["law_content_code"] != target_code or detail["content_type"] != 0:
+                continue
+            out_details.append({
+                **detail,
+                "id": f"{detail['id']}C",
+                "content": detail["content"] + "(同顺序冲突样本)",
+            })
+            break
+    return out, out_details
 
 
 def gen_edge_laws(rng: random.Random, base_index: int) -> list[dict]:
@@ -350,16 +390,21 @@ def gen_cases(rng: random.Random, n: int) -> list[dict]:
 
 
 def gen_punishes(rng: random.Random, cases: list[dict], contents: list[dict],
-                 laws: list[dict]) -> list[dict]:
+                 content_details: list[dict], laws: list[dict]) -> list[dict]:
     """处罚依据行 —— 桥接表。锚命中比例复刻真库 C1/I2。
 
     真库 55,299 行中 3,737 未命中,其中 **3,736 是空串锚**(不是 NULL)、1 条指向不存在的
     content。即:约 93.2% 行带可用锚,6.7% 空串锚,极少数悬空。
     """
-    # 可作锚的正文条款(IS_CATALOG=0 且有正文),按法规归组
+    # 可作锚的正文条款(IS_CATALOG=0 且在详情表有文本),按法规归组。
+    detail_text_by_code = {
+        detail["law_content_code"]: detail["content"]
+        for detail in content_details
+        if detail["content_type"] == 0 and detail["content"] and detail["del_flag"] != "D"
+    }
     by_law: dict[str, list[dict]] = {}
     for c in contents:
-        if c["is_catalog"] == 0 and c["content"]:
+        if c["is_catalog"] == 0 and c["code"] in detail_text_by_code:
             by_law.setdefault(c["law_code"], []).append(c)
     law_by_code = {law["code"]: law for law in laws}
     anchorable = [code for code, items in by_law.items() if items]
@@ -390,7 +435,7 @@ def gen_punishes(rng: random.Random, cases: list[dict], contents: list[dict],
                 # ⚠ 字段语义以真数据 C2 为准(与 dcetl 文档描述相反):
                 "punish_law": law.get("name", ""),        # 法规名
                 "punish_law_title": clause_title,         # 条款标识
-                "content": node["content"] if node else "",
+                "content": detail_text_by_code.get(node["code"], "") if node else "",
                 "create_time": case["create_time"], "update_time": case["update_time"],
                 "del_flag": "A", "data_version": "1",
                 "new_content_code": "", "new_law_code": "", "new_case_code": "",
@@ -500,10 +545,11 @@ def main(argv: list[str] | None = None) -> int:
         edge_codes = {key: row["code"] for (key, _, _), row in zip(EDGE_LAWS, edges, strict=True)}
         laws.extend(edges)
     contents = gen_contents(rng, laws)
+    content_details = gen_content_details(rng, contents)
     if args.edge_cases:
-        contents = apply_content_edges(contents, edge_codes)
+        contents, content_details = apply_content_edges(contents, content_details, edge_codes)
     cases = gen_cases(rng, n_cases)
-    punishes = gen_punishes(rng, cases, contents, laws)
+    punishes = gen_punishes(rng, cases, contents, content_details, laws)
     parties = gen_parties(rng, cases) if args.with_parties else []
 
     engine = create_engine(args.dsn)
@@ -514,11 +560,13 @@ def main(argv: list[str] | None = None) -> int:
         conn.exec_driver_sql(schema_sql)
         insert(conn, "znfg_iam_law_basic", laws)
         insert(conn, "znfg_iam_law_content", contents)
+        insert(conn, "znfg_iam_law_content_detail", content_details)
         insert(conn, "znfg_iam_law_case_basic", cases)
         insert(conn, "znfg_iam_law_case_party", parties)
         insert(conn, "znfg_iam_law_case_punish", punishes)
         push, info = gen_etl_log({
             "znfg_iam_law_basic": len(laws), "znfg_iam_law_content": len(contents),
+            "znfg_iam_law_content_detail": len(content_details),
             "znfg_iam_law_case_basic": len(cases), "znfg_iam_law_case_party": len(parties),
             "znfg_iam_law_case_punish": len(punishes),
         })
@@ -530,7 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"✓ 落库完成\n"
         f"  LAW_BASIC   {len(laws):>7,}\n"
-        f"  LAW_CONTENT {len(contents):>7,}  (每逻辑节点 2 物理行,复刻真库)\n"
+        f"  LAW_CONTENT {len(contents):>7,}  (正文为空,每逻辑节点 2 物理行)\n"
+        f"  CONTENT_DETAIL {len(content_details):>5,}  (正文文本)\n"
         f"  CASE_BASIC  {len(cases):>7,}\n"
         f"  CASE_PARTY  {len(parties):>7,}  {party_note}\n"
         f"  CASE_PUNISH {len(punishes):>7,}  (带锚 {anchored:,} = "

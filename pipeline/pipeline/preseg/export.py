@@ -159,14 +159,61 @@ def _live(rows: list[dict]) -> list[dict]:
 # ── 纯转换(FakeSource 可单测)────────────────────────────────────────────────
 
 
-def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict]:
+def _detail_text_by_content_code(content_details: list[dict]) -> dict[str, str]:
+    """按条款 CODE 稳定合并有效的 ``LAW_CONTENT_DETAIL`` 文本段。
+
+    真实达梦库中 ``LAW_CONTENT.CONTENT`` 几乎全部为空，正文在详情表；详情的
+    ``CONTENT_TYPE=0`` 是文本，图片/视频不进入当前纯文本检索契约。相同条款、相同顺序的
+    重复物理行且内容相同可去重；内容冲突则拒收，不能静默拼出非权威正文。
+    """
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    for detail in _live(content_details):
+        code = _s(detail.get("LAW_CONTENT_CODE"))
+        text = _s(detail.get("CONTENT"))
+        if not code or not text or _int(detail.get("CONTENT_TYPE")) != 0:
+            continue
+        grouped.setdefault(code, []).append((
+            _int(detail.get("CONTENT_ORDER")), str(detail.get("ID") or ""), text,
+        ))
+
+    out: dict[str, str] = {}
+    for code, segments in grouped.items():
+        ordered = sorted(segments, key=lambda segment: (segment[0], segment[1]))
+        by_order: dict[int, str] = {}
+        texts: list[str] = []
+        for order, _row_id, text in ordered:
+            prior = by_order.get(order)
+            if prior is not None:
+                if prior != text:
+                    raise PresegExportError(
+                        f"LAW_CONTENT_DETAIL 同条款同顺序正文冲突 CODE={code} ORDER={order}"
+                    )
+                continue
+            by_order[order] = text
+            texts.append(text)
+        out[code] = "\n".join(texts)
+    return out
+
+
+def blocks_from_contents(
+    contents: list[dict], warnings: list[str], *, content_details: list[dict] | None = None,
+) -> list[dict]:
     """一部法规的 LAW_CONTENT 行 → blocks JSONL records。
 
     - block_seq = 稳定运行序(enumerate 保唯一);排序按 **INDEX_NO(源 0-based 全局序)** + CODE,
       不按 PATH_CODE 字符串(未补零会让 1.10 排在 1.2 前);
     - is_catalog = IS_CATALOG==1;source_code = CODE(精确桥接锚,超 256 → 弃锚+告警不崩);
-    - 正文取 CONTENT(图片/视频详情本轮跳过);空正文目录节点用 TITLE 兜底成块。
+    - 正文优先取 LAW_CONTENT.CONTENT；为空时按同 CODE 回退拼接详情表的文本段；
+      图片/视频详情跳过，空正文目录节点用 TITLE 兜底成块。
     """
+    detail_text_by_code = _detail_text_by_content_code(content_details or [])
+    hydrated: list[dict] = []
+    for content in _live(contents):
+        row = dict(content)
+        if not _s(row.get("CONTENT")):
+            row["CONTENT"] = detail_text_by_code.get(_s(row.get("CODE")) or "")
+        hydrated.append(row)
+
     # 去重:真数据(探查 G1/G2)每节点有 2 物理行(**同 CODE 异 snowflake ID,内容一致**,
     # 全表 COUNT(DISTINCT CODE)恒=1)→ 同 CODE **内容一致**即去重(保留首见,确定性靠 DmSource
     # 的 ORDER BY)。若同 CODE **内容冲突**(TITLE/CONTENT/IS_CATALOG/INDEX_NO 不一致,未来/异常数据)
@@ -174,7 +221,7 @@ def blocks_from_contents(contents: list[dict], warnings: list[str]) -> list[dict
     # 无 CODE 行(罕见)不去重全保留。
     deduped: list[dict] = []
     by_code: dict[str, dict] = {}
-    for c in _live(contents):
+    for c in hydrated:
         code = _s(c.get("CODE"))
         if not code:
             deduped.append(c)
@@ -377,7 +424,11 @@ def _build_into(source: Source, work: Path) -> dict:
             skipped.append(f"重复 CODE={code}")
             continue
         try:
-            blocks = blocks_from_contents(source.contents_for(code), warnings)
+            blocks = blocks_from_contents(
+                source.contents_for(code),
+                warnings,
+                content_details=source.content_details_for(code),
+            )
             if not blocks:
                 skipped.append(f"无正文 CODE={code}")
                 continue
@@ -428,10 +479,11 @@ def _write_manifest(path: Path, rows: list[dict]) -> None:
 
 
 class Source(Protocol):
-    """8 表读取接口。行统一为 ``dict``(键=大写列名);DEL_FLAG 过滤由本模块施加。"""
+    """源库读取接口。行统一为 ``dict``(键=大写列名);DEL_FLAG 过滤由本模块施加。"""
 
     def iter_laws(self) -> list[dict]: ...
     def contents_for(self, law_code: str) -> list[dict]: ...
+    def content_details_for(self, law_code: str) -> list[dict]: ...
     def iter_cases(self) -> list[dict]: ...
     def parties_for(self, case_code: str) -> list[dict]: ...
     def punishes_for(self, case_code: str) -> list[dict]: ...

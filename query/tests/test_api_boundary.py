@@ -1,30 +1,17 @@
-"""audit-biz 边界二 ``POST /v1/query``:无身份、无状态、SSE 五事件、前置过滤(boundary.v1.yaml)。"""
+"""audit-biz 边界二 ``POST /v1/query``:无身份、无状态、JSON 响应、前置过滤。"""
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
 
 from query.api.app import create_app
-from query.contract import AnswerBlock, BlockType, Citation, QueryResult, RouteType
+from query.contract import (
+    AnswerBlock, BlockType, Citation, ClauseHit, QueryResult, RegulationHit,
+    RouteType, StructuredResult, TabPayload,
+)
 from query.retrieve.hybrid import Candidate
-
-
-def _parse_sse(text):
-    """``event:/data:`` 帧 → [(event, data)];keep-alive 注释帧(无 event)按 SSE 规范忽略。"""
-    out = []
-    for block in text.strip().split("\n\n"):
-        event = data = None
-        for line in block.split("\n"):
-            if line.startswith("event:"):
-                event = line[len("event:"):].strip()
-            if line.startswith("data:"):
-                data = line[len("data:"):].strip()
-        if event:
-            out.append((event, json.loads(data)))
-    return out
 
 
 def _cand(cid, score):
@@ -63,6 +50,69 @@ class _Svc:
     def __init__(self, result=None, cands=()):
         self.agent = _Agent(result or _default_result())
         self.retriever = _Retriever(cands)
+        self.case_detail_calls = []
+        self.clause_detail_calls = []
+        self.dm_clause_detail_calls = []
+        self.structured_calls = []
+
+    def structured_for(self, query, *, include_superseded=False):
+        self.structured_calls.append({
+            "query": query,
+            "include_superseded": include_superseded,
+        })
+        return StructuredResult(
+            regulations=TabPayload(items=[
+                RegulationHit(1, "REG-1", "DV-1", "信息披露管理办法", 0.9, "信息披露要求"),
+            ]),
+            clauses=TabPayload(items=[
+                ClauseHit(
+                    1, "c1", "第五条", "信息披露管理办法", "DV-1", 0.8,
+                    source_code="LC-c1", source_doc_id="LB-c1",
+                ),
+            ]),
+            regulatory_rules=TabPayload(items=[]),
+            cases=TabPayload(items=[]),
+        )
+
+    def case_detail(self, case_id, perm_tags):
+        self.case_detail_calls.append((case_id, perm_tags))
+        if case_id == "CASE-404":
+            return None
+        return {
+            "case_id": case_id,
+            "case_name": "信息披露违规案例",
+            "regulator": "中国证监会",
+            "penalty_date": "2024-01-08",
+            "violation_topic": "信息披露",
+            "related_regulation": "上市公司信息披露管理办法",
+            "core_issue": "信息披露内容违法",
+            "insight": "完善披露复核流程",
+            "full_text": "案例完整正文",
+            "source_url": None,
+        }
+
+    def clause_detail(self, clause_id, perm_tags):
+        self.clause_detail_calls.append((clause_id, perm_tags))
+        if clause_id == "CLAUSE-404":
+            return None
+        return {
+            "clause_id": clause_id,
+            "doc_title": "北京证券交易所上市公司证券发行上市审核规则",
+            "clause_path": "第二章/第十七条",
+            "full_text": "第十七条完整正文，不应按检索摘要长度截断。",
+        }
+
+    def dm_clause_detail(self, source_code, source_doc_id):
+        self.dm_clause_detail_calls.append((source_code, source_doc_id))
+        if source_code == "SOURCE-404":
+            return None
+        return {
+            "clause_id": source_code,
+            "source_code": source_code,
+            "source_doc_id": source_doc_id,
+            "doc_title": "达梦制度原文",
+            "full_text": "这是从达梦源库回查的完整条款正文。",
+        }
 
 
 def _default_result():
@@ -114,37 +164,105 @@ def test_boundary_env_unset_is_fail_closed(monkeypatch):
     assert r.json()["error"]["code"] == "B104"
 
 
-# ── 五事件映射 + 轻量引用 + request_id 贯穿 ─────────────────────────────────
-def test_boundary_sse_maps_query_result_to_five_event_vocab(monkeypatch):
+def test_boundary_case_detail_uses_internal_token_and_permission_scope(monkeypatch):
+    svc = _Svc()
+    r = _client(monkeypatch, svc).post(
+        "/v1/cases/CASE-1",
+        json={"filters": {"perm_tags": ["公开"]}},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert r.json()["case_id"] == "CASE-1"
+    assert r.json()["full_text"] == "案例完整正文"
+    assert svc.case_detail_calls == [("CASE-1", ["公开"])]
+
+
+def test_boundary_case_detail_hides_missing_or_out_of_scope_case(monkeypatch):
+    r = _client(monkeypatch).post(
+        "/v1/cases/CASE-404",
+        json={"filters": {"perm_tags": ["公开"]}},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_boundary_clause_detail_uses_internal_token_and_permission_scope(monkeypatch):
+    svc = _Svc()
+    r = _client(monkeypatch, svc).post(
+        "/v1/clauses/CLAUSE-1",
+        json={"filters": {"perm_tags": ["公开"]}},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert r.json()["clause_id"] == "CLAUSE-1"
+    assert r.json()["full_text"] == "第十七条完整正文，不应按检索摘要长度截断。"
+    assert svc.clause_detail_calls == [("CLAUSE-1", ["公开"])]
+
+
+def test_boundary_clause_detail_hides_missing_or_out_of_scope_clause(monkeypatch):
+    r = _client(monkeypatch).post(
+        "/v1/clauses/CLAUSE-404",
+        json={"filters": {"perm_tags": ["公开"]}},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_boundary_dm_clause_detail_uses_both_source_codes(monkeypatch):
+    svc = _Svc()
+    r = _client(monkeypatch, svc).post(
+        "/v1/dm/clauses/SOURCE-1",
+        json={"source_doc_id": "DOC-1"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert r.json()["source_code"] == "SOURCE-1"
+    assert r.json()["full_text"] == "这是从达梦源库回查的完整条款正文。"
+    assert svc.dm_clause_detail_calls == [("SOURCE-1", "DOC-1")]
+
+
+# ── JSON 映射 + 轻量引用 + request_id 贯穿 ─────────────────────────────────
+def test_boundary_json_maps_query_result(monkeypatch):
     svc = _Svc(cands=[_cand("c1", 0.9), _cand("c2", 0.1)])
     r = _client(monkeypatch, svc).post("/v1/query", json=_body(), headers=_HDR)
     assert r.status_code == 200
-    assert "text/event-stream" in r.headers["content-type"]
-    assert r.text.startswith(": keep-alive")  # 首帧注释帧(TTFB/防代理断连)
-    events = _parse_sse(r.text)
-    assert [e for e, _ in events] == ["meta", "delta", "citation", "done"]
-
-    data = dict(events)
-    assert data["meta"] == {
+    assert "application/json" in r.headers["content-type"]
+    data = r.json()
+    assert {key: value for key, value in data["meta"].items() if key != "elapsed_ms"} == {
         "request_id": "REQ-1", "route_type": "evidence",
         "ai_label": True, "review_required": False, "export_enabled": True,
     }
-    assert data["delta"] == {"block_seq": 0, "block_type": "text", "text": "答复"}
+    assert data["meta"]["elapsed_ms"] >= 0
+    assert data["answer_blocks"] == [
+        {"block_seq": 0, "block_type": "text", "content": "答复"}
+    ]
     # 轻量引用:clause_id/chunk_id/score + DM 回查键 source_code/source_doc_id(取自候选=Milvus hit,
     # 非 PG 回查);不泄 doc_title/page/version 等 PG 展示字段。score 来自 collector(c1=0.9 max→1.0)。
-    assert data["citation"] == {
+    assert data["citations"] == [{
         "clause_id": "c1", "chunk_id": "c1", "score": 1.0,
         "source_code": "LC-c1", "source_doc_id": "LB-c1",  # CP-010:DM CODE 随候选流到帧
-    }
-    assert data["done"] == {"finish_reason": "stop", "confidence": 0.8, "exhausted_scope": []}
+    }]
+    assert data["structured"]["regulations"]["total"] == 1
+    assert data["structured"]["regulations"]["items"][0]["title"] == "信息披露管理办法"
+    assert data["structured"]["clauses"]["total"] == 1
+    assert data["structured"]["clauses"]["items"][0]["source_code"] == "LC-c1"
+    assert data["structured"]["clauses"]["items"][0]["source_doc_id"] == "LB-c1"
+    assert data["completion"] == {"finish_reason": "stop", "confidence": 0.8, "exhausted_scope": []}
     assert svc.agent.calls[0]["trace_id"] == "REQ-1"
+    assert svc.structured_calls == [{"query": "客户适当性依据", "include_superseded": True}]
 
 
 def test_boundary_citation_score_null_when_not_in_collected(monkeypatch):
     svc = _Svc(cands=[_cand("other", 0.5)])
     r = _client(monkeypatch, svc).post("/v1/query", json=_body(), headers=_HDR)
-    data = dict(_parse_sse(r.text))
-    assert data["citation"]["score"] is None  # 契约 nullable:biz 降级不显匹配度
+    assert r.json()["citations"][0]["score"] is None  # 契约 nullable:biz 降级不显匹配度
 
 
 def test_boundary_refusal_maps_finish_reason(monkeypatch):
@@ -153,10 +271,10 @@ def test_boundary_refusal_maps_finish_reason(monkeypatch):
         citations=[], confidence=0.0, exhausted_scope=["现行制度"],
     )
     r = _client(monkeypatch, _Svc(result=result)).post("/v1/query", json=_body(), headers=_HDR)
-    data = dict(_parse_sse(r.text))
-    assert data["done"]["finish_reason"] == "refused"
-    assert data["done"]["exhausted_scope"] == ["现行制度"]
-    assert "citation" not in data
+    data = r.json()
+    assert data["completion"]["finish_reason"] == "refused"
+    assert data["completion"]["exhausted_scope"] == ["现行制度"]
+    assert data["citations"] == []
 
 
 # ── 过滤位下推(检索前生效)───────────────────────────────────────────────
@@ -170,6 +288,10 @@ def test_boundary_filters_are_scoped_before_retrieval(monkeypatch):
     assert scope["extra_expr"] == 'array_contains_any(perm_tag, ["内部"])'
     assert "owner" not in scope["extra_expr"]  # owner 不作用于制度语料(契约明文忽略)
     assert isinstance(scope["collector"], list)
+    structured_scope = svc.retriever.scopes[1]
+    assert structured_scope["corpora"] == ("P-INT",)
+    assert structured_scope["extra_expr"] == scope["extra_expr"]
+    assert "collector" not in structured_scope
 
 
 def test_boundary_empty_perm_tags_means_no_extra_filter(monkeypatch):
@@ -203,13 +325,12 @@ def test_boundary_rejects_empty_corpus_types(monkeypatch):
     assert r.status_code == 422
 
 
-# ── error 事件(码在契约 B 段词表内)───────────────────────────────────────
-def test_boundary_error_event_uses_contract_code(monkeypatch):
+# ── JSON 错误响应(码在契约 B 段词表内)─────────────────────────────────────
+def test_boundary_error_response_uses_contract_code(monkeypatch):
     svc = _Svc(result=RuntimeError("boom"))
     r = _client(monkeypatch, svc).post("/v1/query", json=_body(), headers=_HDR)
-    assert r.status_code == 200  # 流已开:错误走 error 事件
-    events = _parse_sse(r.text)
-    assert events == [("error", {"code": "B105", "message": "生成失败"})]
+    assert r.status_code == 500
+    assert r.json() == {"error": {"code": "B105", "message": "生成失败"}}
 
 
 # ── Retriever.scoped:过滤真下推 Milvus + 复位 + 收集 ─────────────────────────

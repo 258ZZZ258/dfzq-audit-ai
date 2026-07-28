@@ -2,7 +2,7 @@
 
 ``POST /conversations/{cid}/messages``(同步 JSON):校验 query≤2000 / 附件 / corpus → 取会话 history →
 ``agent.ask`` → ``structured_for`` 装配四-Tab → 落 user+assistant → 返 §10+structured。
-中途异常不静默(经统一 500,不写半截)。SSE 分支(text/event-stream)在 T11 加。
+中途异常不静默(经统一 500,不写半截)。接口始终返回一次性 JSON。
 """
 
 from __future__ import annotations
@@ -10,8 +10,7 @@ from __future__ import annotations
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from query.api.errors import not_found, validation_error
@@ -28,7 +27,7 @@ class AskBody(BaseModel):
 
 
 @router.post("/{cid}/messages")
-def ask(cid: str, body: AskBody, request: Request, svc: QueryService = Depends(get_service)):
+def ask(cid: str, body: AskBody, svc: QueryService = Depends(get_service)):
     conv = svc.store.get_conversation(cid)
     if conv is None:
         raise not_found("会话不存在")
@@ -38,18 +37,6 @@ def ask(cid: str, body: AskBody, request: Request, svc: QueryService = Depends(g
         {"role": m["role"], "content": m["content"]}
         for m in conv.get("messages", []) if m.get("content")
     ]
-
-    # SSE 分支(Accept: text/event-stream);否则同步 JSON
-    if "text/event-stream" in request.headers.get("accept", ""):
-        from query.api.sse import stream_ask
-
-        return StreamingResponse(
-            stream_ask(
-                svc, cid, body.query, history,
-                include_superseded=body.include_superseded, corpus=body.corpus,
-            ),
-            media_type="text/event-stream",
-        )
 
     t0 = time.perf_counter()
     result = svc.agent.ask(body.query, history=history)   # 异常 → 统一 500(非静默,不落半截)

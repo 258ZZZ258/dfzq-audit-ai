@@ -6,10 +6,12 @@
 
 ## 一句话
 
-Java 后端 `audit-biz` 调 Python `audit-ai` 的**无状态、无身份**制度查询热路径,SSE 流式:
+Java 后端调用 Python `audit-ai` 的**无状态、无身份**制度查询热路径，使用一次性 JSON:
 
 ```text
 POST /v1/query          # 只给 Java 后端调用;前端页面接口仍是 /api/query/v1/*(不受本接口影响)
+POST /v1/cases/{case_id} # 查询结果中的案例详情回查，同样只给 Java 调用
+POST /v1/dm/clauses/{source_code} # 条款/监管规则命中的达梦源库全文回查，同样只给 Java 调用
 ```
 
 实现:`query/query/api/routes_boundary.py`(薄壳 over `QueryAgent.ask`,不改 AI 内核)。
@@ -61,26 +63,44 @@ POST /v1/query          # 只给 Java 后端调用;前端页面接口仍是 /api
 
 schema 接入项目语料后一并放开(去掉 `_build_scope` 的守卫 + 加 `project_id`/`owner` 前置过滤)。
 
-## 响应:SSE(`text/event-stream`)
+## 响应:JSON(`application/json`)
 
-首先发一个 keep-alive 注释帧(`: keep-alive`,保 TTFB / 防代理空闲断连,非事件,按 SSE 规范忽略),
-随后事件序:`meta` →(`delta`* + `citation`*)→ `done`;任意时刻异常 → `error` 后关闭。
+成功时在一次 HTTP 响应中返回完整结果；不使用 keep-alive、事件帧或长连接。结构如下：
 
-| event | data(JSON)| 说明 |
-|---|---|---|
-| `meta` | `{request_id, route_type, ai_label, review_required, export_enabled}` | 首事件。`ai_label` 为**布尔**恒 `true`;`route_type` ∈ 八路;`review_required=true`(判定型)→ biz 渲染人工复核框 |
-| `delta` | `{block_seq, block_type, text}` | 答案块。当前按契约允许的**整块下发**(`stream=false`),`block_seq` 供拼接 |
-| `citation` | `{clause_id, chunk_id, score}` | **轻量引用**:`clause_id`(=`chunk_id`,回查主键)+ `score`。四级定位由 **Java 回查 PG 装配**(§8.2),边界**不带**回查字段。无引用的路由(拒答/闲聊)不发 |
-| `done` | `{finish_reason, confidence, exhausted_scope}` | 末事件。`finish_reason`:`stop`/`refused`(覆盖感知拒答,非错误)|
-| `error` | `{code, message}` | 见下 |
+```json
+{
+  "meta": {"request_id": "REQ-...", "route_type": "evidence", "ai_label": true,
+            "review_required": false, "export_enabled": true},
+  "answer_blocks": [{"block_seq": 0, "block_type": "text", "content": "..."}],
+  "citations": [{"clause_id": "...", "chunk_id": "...", "score": 0.91,
+                 "source_code": "...", "source_doc_id": "..."}],
+  "structured": {
+    "regulations": {"total": 1, "items": []},
+    "clauses": {"total": 2, "items": []},
+    "regulatory_rules": {"total": 3, "items": []},
+    "cases": {"total": 4, "items": []}
+  },
+  "completion": {"finish_reason": "stop", "confidence": 0.8, "exhausted_scope": []}
+}
+```
+
+- `answer_blocks`：答案块，`block_seq` 供 Java/前端保持顺序，`content` 为完整正文。
+- `citations`：轻量引用。`clause_id`(=`chunk_id`)是回查主键；`source_code` 和 `source_doc_id`
+  可为空，供 Java 侧授权回查时使用。拒答/闲聊等无引用的路由返回空数组。
+- `completion.finish_reason`：`stop` 或 `refused`（覆盖感知拒答，不是错误）。
+- `structured`：浏览器右侧四个结果 Tab 的权威结构化命中。法规、条款、监管规则命中项对达梦来源
+  add-only 携带 `source_code`/`source_doc_id`，与 citation 语义相同；查询回答和结构化装配各自检索一次，
+  但两次都在 Java 下传的同一 `corpus_types`/`perm_tags` 前置过滤范围内；不得为了装配 Tab
+  绕过该 scope，也不得由 Java 将其替换为空数组。
 
 - `citation.score`:per-hit 检索融合分,min-max 归一到 0–1,与前端 structured「匹配度」**同口径**
   (`structured.make_normalizer`)。**从 ask 的同一次检索候选派生**(经 `Retriever.scoped(collector=...)`
   收集),**不做二次检索**,无候选集漂移。契约 `nullable`:极少数自建候选的路由取不到分 → `null`,biz 降级不显。
 
-### error 事件错误码
+### JSON 错误响应
 
-生成失败发 `{"code": "B105", "message": "生成失败"}`(不泄内部细节,堆栈进日志/trace)。
+生成失败返回 HTTP `500`：`{"error": {"code": "B105", "message": "生成失败"}}`
+(不泄内部细节，堆栈进日志/trace)。
 
 > **契约已登记**:`B105`(查询热路径内部错误,服务向)同 `B104` 属 B1xx **服务向**段,已在契约单一源
 > 登记(biz `boundary.v1.yaml` QueryErrorEvent + `SPEC-BOUNDARY.md §3.3`,audit-biz PR#6)。
@@ -121,3 +141,42 @@ export AUDIT_AI_INTERNAL_TOKEN=dev-secret
 ```
 
 端口非契约,运维/Java 可改;稳定路径是 `/v1/query`。
+
+## 案例详情回查
+
+查询响应中的案例卡使用 `case_id`（当前实现为案例 `doc_version_id`）作为回查主键。浏览器不能直接
+调用 Python，而是经 Java 的 `GET /api/v1/regulation/cases/{case_id}`；Java 再调用：
+
+```text
+POST /v1/cases/{case_id}
+X-Internal-Token: <令牌>
+Content-Type: application/json
+
+{"filters":{"perm_tags":["公开"]}}
+```
+
+成功时直接返回案例 JSON，至少含 `case_id`、`case_name`、`regulator`、`penalty_date`、
+`violation_topic`、`related_regulation`、`core_issue`、`insight`、`full_text`、`source_url`。
+Java 负责封装为既有浏览器 `Result<T>` 成功体。
+
+该回查在 PostgreSQL 权威案例/文档版本/分块表中完成，`perm_tags` 必须再次校验；案例不存在和超出
+授权范围均返回 `404`，不得据此泄露未授权案例的存在性。
+
+## 达梦条款与监管规则全文回查
+
+查询响应中的 `clause_id` 是浏览器详情路由键；同一条已授权命中携带
+`source_code=LAW_CONTENT.CODE`、`source_doc_id=LAW_BASIC.CODE`。Java 缓存这对键后，浏览器仍经
+`GET /api/v1/regulation/clauses/{clause_id}` 回查；Java 再以同一内部令牌调用：
+
+```text
+POST /v1/dm/clauses/{source_code}
+X-Internal-Token: <令牌>
+Content-Type: application/json
+
+{"source_doc_id":"LAW_BASIC.CODE"}
+```
+
+audit-ai 按两个源 CODE 直读 `ZNFG_IAM_LAW_CONTENT JOIN ZNFG_IAM_LAW_BASIC`，连接串只从
+`PRESEG_SOURCE_DSN` 获取（本地为 PG 仿真、内网为达梦）。成功时返回完整 `full_text`（并保留兼容字段
+`text`）和源文档元数据，不能以结构化检索中的 140 字 `snippet` 或 `core_requirement` 代替原文。Java
+不得接受浏览器传来的源 CODE，缓存缺失/过期必须提示重新查询，不能回退到 audit-ai PG 条款端点。

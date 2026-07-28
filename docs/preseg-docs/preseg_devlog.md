@@ -97,3 +97,30 @@
 
 `tools/mock_source/verify.py` 一键跑通:造数 → 导出 → 断言 13 个定向边缘样本各自落对
 (7 拒收/跳过 + 6 通过且字段正确)+ 桥接锚落到 blocks/cases。随仿真数据或 export 口径漂移即红。
+
+## 2026-07-28 真实正文落点复核：`LAW_CONTENT_DETAIL` 是必经路径
+
+内网对有效 `ZNFG_IAM_LAW_CONTENT` 的统计为 **445,477 行，其中 445,475 行 `CONTENT` 为空**。
+此前文档虽把 `LAW_CONTENT_DETAIL` 标作文本来源，但实际 `DmSource`/导出实现只读取主表，真实全量
+导出会因“无正文”跳过绝大多数法规；详情 API 也会返回空 `full_text`。这不是数据质量可忽略项，
+而是 source adapter 漏接了一张正文表。
+
+### 已落实的统一规则
+
+- `DmSource.content_details_for(law_code)` 读取详情表，导出按 `LAW_CONTENT_CODE` 关联回主表
+  `CODE`；只收 `DEL_FLAG` 在册、`CONTENT_TYPE=0` 的段，按 `CONTENT_ORDER, ID` 稳定拼接。
+- 仅当主表 `CONTENT` 为空时才回退详情，避免破坏现有主表正文和 PG 仿真语料；图片/视频（类型 1/2）
+  不进入当前纯文本索引。
+- 同一条款同一顺序的相同重复段去重；文本不同则拒绝导出，不能静默选其中一份。
+- `QueryService.dm_clause_detail` 使用同一回退规则，使 Java 的“查看详情”与入库后检索使用同一份
+  正文，且继续以 `LAW_CONTENT.CODE` 作为 Java 缓存/案例桥接锚。
+
+### 验证与后续内网验收
+
+单测覆盖主表空、详情乱序、图片、删除段、PG 小写键/DM 大写键和详情 API。PG 仿真仍主要使用主表
+合成正文，所以它只能验证兼容路径；内网部署需要用只读账号至少跑一部真实法规的导出，并抽查：
+
+1. 导出的块数与 `CONTENT_TYPE=0` 的有效详情段/条款编码对应；
+2. 随机 10 条 `full_text` 与源端按顺序拼接结果逐字一致；
+3. 图片/视频和 `DEL_FLAG='D'` 不进入块文本；
+4. 案例 `LAW_CONTENT_CODE` 仍能命中相同的 `source_code`。

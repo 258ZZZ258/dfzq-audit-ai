@@ -71,6 +71,8 @@ def _clauses(cands, chunk_doc, norm) -> list[ClauseHit]:
             clause_title=_clause_title(chunk.clause_path), doc_title=_title(dv),
             doc_id=chunk.doc_version_id, match_score=norm(_display_score(c)),
             clause_path=chunk.clause_path, summary=_truncate(chunk.text, _SUMMARY_LEN),
+            source_code=getattr(c, "source_code", None),
+            source_doc_id=getattr(c, "source_doc_id", None),
             # theme(⚠-data):无 clause_tags 回查 → None(省略);后续迭代接打标
         ))
     return out
@@ -87,6 +89,8 @@ def _regulations(cands, chunk_doc, norm) -> list[RegulationHit]:
             doc_no=_attr(dv, "doc_number"), publish_date=_iso(_attr(dv, "issue_date")),
             effective_date=_iso(_attr(dv, "effective_date")), issuing_dept=_attr(dv, "issuer"),
             version=_iso(_attr(dv, "issue_date")), status=_attr(dv, "version_status"),
+            source_code=getattr(c, "source_code", None),
+            source_doc_id=getattr(c, "source_doc_id", None),
         ))
     return out
 
@@ -103,6 +107,8 @@ def _reg_rules(cands, chunk_doc) -> list[RegulatoryRuleHit]:
             core_requirement=_truncate(chunk.text, _EXCERPT_LEN),
             issuing_body=_attr(dv, "issuer"), doc_no=_attr(dv, "doc_number"),
             publish_date=_iso(_attr(dv, "issue_date")),
+            source_code=getattr(c, "source_code", None),
+            source_doc_id=getattr(c, "source_doc_id", None),
             # related_internal(⚠-data):clause_references 未落 → 空(省略);theme 同
         ))
     return out

@@ -11,6 +11,8 @@ Web 工作台,**契约对齐生产设计 v1.6**(CP-007 实体类型/期限归一
 > 架构与硬契约见 `CLAUDE.md`(底部「模块开发记忆索引」→ 各包内 `*_devlog.md`);文档处理子系统规格见
 > `docs/file-processing-workflow-docs/SPEC*.md` / `docs/file-processing-workflow-docs/PLAN*.md` / `docs/file-processing-workflow-docs/TASKS*.md`;设计依据 `docs/文档处理与语料库构建_技术框架设计_v1.6.md`、
 > `docs/制度查询与制度比对智能体_RAG技术框架设计_v1.5.md`。本文件只讲怎么跑起来。
+> 后续 Pi Agent 重构制度查询/比对前，先读
+> [`docs/query-agent-docs/PI-AGENT-REFACTOR-HANDOFF.md`](docs/query-agent-docs/PI-AGENT-REFACTOR-HANDOFF.md)。
 
 ## 仓库结构(workspace)
 

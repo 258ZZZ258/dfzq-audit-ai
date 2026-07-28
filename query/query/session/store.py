@@ -105,7 +105,7 @@ class SessionStore:
     ) -> str:
         """追加一轮消息(seq 自增),同步 conversation.message_count / last_hit_counts。
 
-        ``message_id`` 显式给(SSE 用广告的 id 落库,保 accepted/done 的 id 可回查)否则自生 ULID。
+        ``message_id`` 显式给时用于调用方回查；否则自生 ULID。
         会话不存在 → ``KeyError``。assistant 消息带 hit_counts 时刷新会话统计卡冗余。
         """
         mid = message_id or str(ULID())

@@ -39,6 +39,70 @@ def test_clause_not_found_404():
     assert _client({}).get(f"{_PREFIX}/clauses/nope").status_code == 404
 
 
+def test_dm_clause_detail_falls_back_to_ordered_text_details(monkeypatch):
+    """真实达梦主表正文为空时，详情 API 仍必须返回完整可读条文。"""
+    import sqlalchemy
+
+    from query.api.service import QueryService
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+        def all(self):
+            return self._rows
+
+    class _Connection:
+        def __init__(self):
+            self.sql = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement, params):
+            self.sql.append((str(statement), params))
+            if "ZNFG_IAM_LAW_CONTENT_DETAIL" not in str(statement):
+                return _Rows([{
+                    "source_doc_id": "LAW-1", "doc_title": "测试法规", "doc_number": None,
+                    "issuer": None, "status_code": "inuse", "effective_date": None,
+                    "source_code": "CONTENT-1", "clause_title": "第一条", "clause_path": None,
+                    "full_text": "",
+                }])
+            return _Rows([
+                {"content_order": 2, "content": "后半段。"},
+                {"content_order": 1, "content": "前半段"},
+            ])
+
+    class _Engine:
+        def __init__(self):
+            self.connection = _Connection()
+
+        def connect(self):
+            return self.connection
+
+    engine = _Engine()
+    monkeypatch.setenv("PRESEG_SOURCE_DSN", "postgresql://mock")
+    monkeypatch.setattr(sqlalchemy, "create_engine", lambda *_args, **_kwargs: engine)
+    svc = QueryService(agent=None, pg=None, store=None, retriever=None, qcfg=None)
+
+    detail = svc.dm_clause_detail("CONTENT-1", "LAW-1")
+
+    assert detail["full_text"] == "前半段\n后半段。"
+    assert detail["text"] == detail["full_text"]
+    assert len(engine.connection.sql) == 2
+    assert "CONTENT_TYPE = 0" in engine.connection.sql[1][0]
+    assert engine.connection.sql[1][1] == {"source_code": "CONTENT-1", "source_doc_id": "LAW-1"}
+
+
 # ── 集成(真栈;离线 skip)────────────────────────────────────────────────────
 def test_clause_detail_integration(indexed_stack):
     from sqlalchemy import select

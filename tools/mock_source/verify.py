@@ -31,7 +31,7 @@ EXPECT_REJECTED = {
     "status-testrun": "test_run CODE=",
     "issuer-overflow": "issuer 长度 180 超 PG 列宽 128",
     "no-content": "无正文 CODE=",
-    "content-conflict": "重复行内容冲突",
+    "content-conflict": "LAW_CONTENT_DETAIL 同条款同顺序正文冲突",
 }
 
 #: 通过的边缘 → 期望的 manifest 字段值(只查列出的键)

@@ -140,7 +140,7 @@ CREATE TABLE znfg_iam_law_content (
 
 
 -- ========== 4. 条文富文本/多媒体详情(dcetl §3.6)==========
--- 本轮转换脚本不消费(图片/视频块跳过),建表仅为结构完整。
+-- 主表正文为空时，转换脚本消费 CONTENT_TYPE=0 的文本段；图片/视频(1/2)跳过。
 
 CREATE TABLE znfg_iam_law_content_detail (
     etl_src_date      INTEGER,

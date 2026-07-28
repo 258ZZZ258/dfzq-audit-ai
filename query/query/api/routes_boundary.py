@@ -1,4 +1,4 @@
-"""audit-biz → audit-ai 边界二:无状态 ``POST /v1/query`` SSE 薄壳(boundary.v1.yaml v1.1.0)。
+"""audit-biz → audit-ai 边界二:无状态 ``POST /v1/query`` JSON 薄壳。
 
 独立于前端向 ``/api/query/v1/*`` 会话式 API:无用户身份、无会话落库、无导出;引用只回轻量
 标识(clause_id/chunk_id/score),四级回查归 Java(§8.2 收口)。Java 预计算的 ``filters`` 经
@@ -7,21 +7,20 @@ per-hit 分数从**同一次**检索的候选收集槽派生,不二次检索。
 
 已知限制(详见 ``docs/query-agent-docs/BOUNDARY-v1-query-api.md``):薄壳不改 AI 内核 →
 正文生成仍依赖 PG 权威全文(契约「热路径不依赖 PG」措辞待修);``delta`` 按契约允许的
-整块下发(首帧 keep-alive 注释帧保 TTFB)。
+整块返回。浏览器侧轮询/一次性查询均通过 Java 边界收口。
 """
 
 from __future__ import annotations
 
+import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from query.api.auth import require_internal_token
-from query.api.errors import validation_error
+from query.api.errors import ApiError, not_found, validation_error
 from query.api.service import QueryService, get_service
-from query.api.sse import KEEPALIVE, format_sse
 from query.api.structured import _display_score, make_normalizer
 from query.contract import RouteType
 from query.listing.r4_listing import array_any_expr
@@ -30,9 +29,7 @@ router = APIRouter(tags=["boundary"])
 
 #: 边界 corpus_types → Milvus corpus_type 分区值(audit_project 未接入 → 422,见 ``_build_scope``)。
 _CORPUS_MAP = {"internal": "P-INT", "external": "P-EXT", "qa": "P-QA", "case": "P-CASE"}
-#: SSE ``error`` 事件码:查询热路径内部错误(服务向)。同 ``B104`` 属 B1xx 服务向段;
-#: 已在契约单一源登记(biz ``boundary.v1.yaml`` QueryErrorEvent + SPEC-BOUNDARY §3.3,
-#: audit-biz PR#6)。合并顺序:biz 登记先行 → 本仓照做。
+#: 查询热路径内部错误码(服务向)。
 _ERR_INTERNAL = "B105"
 
 
@@ -63,16 +60,74 @@ class BoundaryQueryRequest(BaseModel):
     options: BoundaryOptions = Field(default_factory=BoundaryOptions)
 
 
+class BoundaryCaseDetailFilters(BaseModel):
+    """Case detail stays behind the same Java-computed permission boundary."""
+
+    perm_tags: list[str]
+
+
+class BoundaryCaseDetailRequest(BaseModel):
+    filters: BoundaryCaseDetailFilters
+
+
+class BoundaryDmClauseDetailRequest(BaseModel):
+    """Java 已授权 citation 的两个达梦回查键。"""
+
+    source_doc_id: str = Field(..., min_length=1)
+
+
 @router.post("/v1/query")
 def query_boundary(
     body: BoundaryQueryRequest,
     _auth: None = Depends(require_internal_token),
     svc: QueryService = Depends(get_service),
 ):
-    scope = _build_scope(body.filters, body.options)  # 422 在流开始前抛(统一 JSON 错误体)
-    return StreamingResponse(
-        _stream_query(svc, body, scope), media_type="text/event-stream"
-    )
+    scope = _build_scope(body.filters, body.options)
+    return _query_response(svc, body, scope)
+
+
+@router.post("/v1/cases/{case_id}")
+def case_detail_boundary(
+    case_id: str,
+    body: BoundaryCaseDetailRequest,
+    _auth: None = Depends(require_internal_token),
+    svc: QueryService = Depends(get_service),
+) -> dict:
+    detail = svc.case_detail(case_id, body.filters.perm_tags)
+    if detail is None:
+        # Missing and unauthorized are deliberately indistinguishable.
+        raise not_found("案例不存在")
+    return detail
+
+
+@router.post("/v1/clauses/{clause_id}")
+def clause_detail_boundary(
+    clause_id: str,
+    body: BoundaryCaseDetailRequest,
+    _auth: None = Depends(require_internal_token),
+    svc: QueryService = Depends(get_service),
+) -> dict:
+    """Returns authoritative clause text only inside Java's permission scope."""
+    detail = svc.clause_detail(clause_id, body.filters.perm_tags)
+    if detail is None:
+        # Missing and unauthorized are deliberately indistinguishable.
+        raise not_found("条款不存在")
+    return detail
+
+
+@router.post("/v1/dm/clauses/{source_code}")
+def dm_clause_detail_boundary(
+    source_code: str,
+    body: BoundaryDmClauseDetailRequest,
+    _auth: None = Depends(require_internal_token),
+    svc: QueryService = Depends(get_service),
+) -> dict:
+    """按 citation 的 DM CODE 读取源库，不以 audit-ai PG 的 chunk_id 回查。"""
+    detail = svc.dm_clause_detail(source_code, body.source_doc_id)
+    if detail is None:
+        # 和其他详情接口一致：不暴露源库中不存在的键。
+        raise not_found("条款不存在")
+    return detail
 
 
 def _build_scope(filters: BoundaryFilters, options: BoundaryOptions) -> dict:
@@ -95,49 +150,57 @@ def _build_scope(filters: BoundaryFilters, options: BoundaryOptions) -> dict:
     }
 
 
-def _stream_query(svc: QueryService, body: BoundaryQueryRequest, scope: dict):
-    yield KEEPALIVE  # 首字节立即出(注释帧防代理空闲断连;非事件,Java 侧按 SSE 规范忽略)
+def _query_response(svc: QueryService, body: BoundaryQueryRequest, scope: dict) -> dict:
+    """执行一次查询并返回完整 JSON；不在传输层暴露事件或流状态。"""
     try:
+        started_at = time.perf_counter()
         collected: list = []
-        # fail-closed:retriever 无 scoped 即异常 → error 事件,绝不无过滤放行(权限红线)
+        # fail-closed:retriever 无 scoped 即异常，绝不无过滤放行(权限红线)
         with svc.retriever.scoped(collector=collected, **scope):
             result = svc.agent.ask(body.query, trace_id=body.request_id)
 
-        yield format_sse("meta", {
-            "request_id": body.request_id,
-            "route_type": result.route_type.value,
-            "ai_label": result.ai_label,
-            "review_required": result.review_required,
-            "export_enabled": result.export_enabled,
-        })
-        for seq, block in enumerate(result.answer_blocks):
-            yield format_sse("delta", {
+        # 浏览器结果 Tab 由同一查询和同一 Java 预计算权限范围生成。结构化装配需要
+        # 独立检索，故单独开 scoped 上下文，避免干扰回答引用的候选分数收集。
+        with svc.retriever.scoped(**scope):
+            structured = svc.structured_for(
+                body.query, include_superseded=body.options.include_superseded,
+            )
+
+        score_map = _score_map(collected)
+        src_map = _source_map(collected)
+        return {
+            "meta": {
+                "request_id": body.request_id,
+                "route_type": result.route_type.value,
+                "ai_label": result.ai_label,
+                "review_required": result.review_required,
+                "export_enabled": result.export_enabled,
+                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+            },
+            "answer_blocks": [{
                 "block_seq": seq,
                 "block_type": block.type.value,
-                "text": block.content,
-            })
-        if result.citations:
-            score_map = _score_map(collected)
-            src_map = _source_map(collected)
-            for citation in result.citations:
+                "content": block.content,
+            } for seq, block in enumerate(result.answer_blocks)],
+            "citations": [{
                 # 轻量引用:clause_id(=chunk_id)+ score + DM 回查键(source_code/source_doc_id,
                 # 取自本次检索候选=Milvus hit,不新增 PG 回查);Java 按 source_code 回查达梦四级引用。
-                src = src_map.get(citation.clause_id, {})
-                yield format_sse("citation", {
-                    "clause_id": citation.clause_id,
-                    "chunk_id": citation.clause_id,
-                    "score": score_map.get(citation.clause_id),
-                    "source_code": src.get("source_code"),  # LAW_CONTENT.CODE;非 DM/弃锚→null
-                    "source_doc_id": src.get("source_doc_id"),  # LAW_BASIC.CODE
-                })
-        yield format_sse("done", {
-            "finish_reason": "refused" if result.route_type is RouteType.REFUSE else "stop",
-            "confidence": result.confidence,
-            "exhausted_scope": list(result.exhausted_scope),
-        })
+                "clause_id": citation.clause_id,
+                "chunk_id": citation.clause_id,
+                "score": score_map.get(citation.clause_id),
+                "source_code": src_map.get(citation.clause_id, {}).get("source_code"),
+                "source_doc_id": src_map.get(citation.clause_id, {}).get("source_doc_id"),
+            } for citation in result.citations],
+            "structured": structured.to_dict(),
+            "completion": {
+                "finish_reason": "refused" if result.route_type is RouteType.REFUSE else "stop",
+                "confidence": result.confidence,
+                "exhausted_scope": list(result.exhausted_scope),
+            },
+        }
     except Exception:
-        # 500 语义:不泄内部细节(堆栈进日志/trace);码在契约 B1xx 服务向段(见 _ERR_INTERNAL)
-        yield format_sse("error", {"code": _ERR_INTERNAL, "message": "生成失败"})
+        # 500 不泄内部细节；统一错误处理器渲染 JSON 错误体。
+        raise ApiError(500, _ERR_INTERNAL, "生成失败")
 
 
 def _source_map(candidates: list) -> dict[str, dict]:

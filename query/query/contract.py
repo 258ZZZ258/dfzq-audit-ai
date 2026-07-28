@@ -101,6 +101,8 @@ class RegulationHit:
     issuing_dept: str | None = None    # 发布部门(doc_versions.issuer)
     version: str | None = None
     status: str | None = None          # effective | superseded | abolished
+    source_code: str | None = None     # DM LAW_CONTENT.CODE，Java 详情回查键
+    source_doc_id: str | None = None   # DM LAW_BASIC.CODE，Java 详情回查键
 
     def to_dict(self) -> dict:
         return _compact(
@@ -109,6 +111,7 @@ class RegulationHit:
             doc_no=self.doc_no, publish_date=self.publish_date,
             effective_date=self.effective_date, issuing_dept=self.issuing_dept,
             version=self.version, status=self.status,
+            source_code=self.source_code, source_doc_id=self.source_doc_id,
         )
 
 
@@ -125,12 +128,15 @@ class ClauseHit:
     clause_path: str | None = None
     summary: str | None = None
     theme: str | None = None
+    source_code: str | None = None     # DM LAW_CONTENT.CODE，Java 详情回查键
+    source_doc_id: str | None = None   # DM LAW_BASIC.CODE，Java 详情回查键
 
     def to_dict(self) -> dict:
         return _compact(
             seq=self.seq, clause_id=self.clause_id, clause_title=self.clause_title,
             doc_title=self.doc_title, doc_id=self.doc_id, match_score=self.match_score,
             clause_path=self.clause_path, summary=self.summary, theme=self.theme,
+            source_code=self.source_code, source_doc_id=self.source_doc_id,
         )
 
 
@@ -148,6 +154,8 @@ class RegulatoryRuleHit:
     publish_date: str | None = None
     theme: str | None = None
     related_internal: list[str] = field(default_factory=list)
+    source_code: str | None = None     # DM LAW_CONTENT.CODE，Java 详情回查键
+    source_doc_id: str | None = None   # DM LAW_BASIC.CODE，Java 详情回查键
 
     def to_dict(self) -> dict:
         return _compact(
@@ -155,6 +163,7 @@ class RegulatoryRuleHit:
             core_requirement=self.core_requirement, issuing_body=self.issuing_body,
             doc_no=self.doc_no, publish_date=self.publish_date, theme=self.theme,
             related_internal=self.related_internal or None,
+            source_code=self.source_code, source_doc_id=self.source_doc_id,
         )
 
 

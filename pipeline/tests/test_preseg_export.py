@@ -16,6 +16,7 @@ from pipeline.preseg.reader import (
     validate_manifest_header,
     validate_manifest_rows,
 )
+from pipeline.preseg_export import DmSource
 
 
 class FakeSource(export.Source):
@@ -51,6 +52,9 @@ class FakeSource(export.Source):
             {"CODE": "LC-DEL", "IS_CATALOG": 0, "TITLE": "第九十九条", "INDEX_NO": 2,
              "CONTENT": "已删除条文。", "DEL_FLAG": "D"},
         ]
+
+    def content_details_for(self, law_code):
+        return []
 
     def iter_cases(self):
         return [{"CODE": "C-1", "NAME": "某营业部违规招揽案", "DOC_NO": "沪证监决〔2025〕12号",
@@ -212,6 +216,99 @@ def test_deleted_and_empty_laws_filtered(tmp_path):
     export.build_batch(FakeSource(), tmp_path)
     assert not list((tmp_path / "blocks").glob("L-DEL-*.jsonl"))
     assert not list((tmp_path / "blocks").glob("L-EMPTY-*.jsonl"))
+
+
+def test_blocks_fall_back_to_live_text_details_when_main_content_is_empty():
+    """真实达梦中 LAW_CONTENT.CONTENT 基本为空，正文在 CONTENT_DETAIL 分段存放。"""
+    contents = [{
+        "CODE": "LC-1", "IS_CATALOG": 0, "TITLE": "第一条", "INDEX_NO": 1,
+        "CONTENT": "", "DEL_FLAG": "A",
+    }]
+    details = [
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 2, "CONTENT_TYPE": 0,
+         "CONTENT": "后半段。", "DEL_FLAG": "A"},
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 1, "CONTENT_TYPE": 0,
+         "CONTENT": "前半段", "DEL_FLAG": "A"},
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 3, "CONTENT_TYPE": 1,
+         "CONTENT": "图片内容不应进入文本索引", "DEL_FLAG": "A"},
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 4, "CONTENT_TYPE": 0,
+         "CONTENT": "已删除正文", "DEL_FLAG": "D"},
+    ]
+
+    blocks = export.blocks_from_contents(contents, [], content_details=details)
+
+    assert len(blocks) == 1
+    assert blocks[0]["source_code"] == "LC-1"
+    assert blocks[0]["text"] == "前半段\n后半段。"
+
+
+def test_blocks_keep_nonempty_main_content_over_details():
+    """旧数据/仿真库主表有正文时，不因详情表存在而改变既有权威文本。"""
+    contents = [{
+        "CODE": "LC-1", "IS_CATALOG": 0, "TITLE": "第一条", "INDEX_NO": 1,
+        "CONTENT": "主表正文。", "DEL_FLAG": "A",
+    }]
+    details = [{
+        "LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 1, "CONTENT_TYPE": 0,
+        "CONTENT": "不应覆盖主表的详情正文。", "DEL_FLAG": "A",
+    }]
+
+    blocks = export.blocks_from_contents(contents, [], content_details=details)
+
+    assert blocks[0]["text"] == "主表正文。"
+
+
+def test_build_batch_reads_details_for_empty_main_content(tmp_path):
+    class DetailSource(FakeSource):
+        def contents_for(self, law_code):
+            rows = super().contents_for(law_code)
+            if law_code == "L-1":
+                rows[1] = {**rows[1], "CONTENT": ""}
+            return rows
+
+        def content_details_for(self, law_code):
+            if law_code != "L-1":
+                return []
+            return [{
+                "LAW_CONTENT_CODE": "LC-021", "CONTENT_ORDER": 0, "CONTENT_TYPE": 0,
+                "CONTENT": "来自真实正文详情表的条文。", "DEL_FLAG": "A",
+            }]
+
+    export.build_batch(DetailSource(), tmp_path)
+
+    blocks = read_blocks(next((tmp_path / "blocks").glob("L-1-*.jsonl")))
+    text_by_source_code = {block.source_code: block.text for block in blocks}
+    assert text_by_source_code["LC-021"] == "来自真实正文详情表的条文。"
+
+
+def test_dm_source_reads_detail_text_with_uppercase_keys():
+    class Row:
+        _mapping = {
+            "law_content_code": "LC-021", "content_order": 1, "content_type": 0,
+            "content": "正文", "del_flag": "A", "id": "DETAIL-1",
+        }
+
+    class Connection:
+        def __init__(self):
+            self.sql = None
+            self.params = None
+
+        def execute(self, statement, params):
+            self.sql = str(statement)
+            self.params = params
+            return [Row()]
+
+    connection = Connection()
+
+    rows = DmSource(connection).content_details_for("L-1")
+
+    assert rows == [{
+        "LAW_CONTENT_CODE": "LC-021", "CONTENT_ORDER": 1, "CONTENT_TYPE": 0,
+        "CONTENT": "正文", "DEL_FLAG": "A", "ID": "DETAIL-1",
+    }]
+    assert "ZNFG_IAM_LAW_CONTENT_DETAIL" in connection.sql
+    assert "ORDER BY LAW_CONTENT_CODE, CONTENT_ORDER, ID" in connection.sql
+    assert connection.params == {"c": "L-1"}
 
 
 def test_duplicate_code_rows_deduped(tmp_path):

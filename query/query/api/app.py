@@ -1,7 +1,7 @@
 """T4(SPEC-API §15):FastAPI app 工厂。
 
 薄壳 over ``QueryService``;统一错误处理(§9);``/healthz`` 免依赖(不碰真栈)。业务路由(会话/问答/
-条款/推荐/上传/导出/SSE)在 T5–T11 逐个 ``include_router`` 挂载。
+条款/推荐/上传/导出)在 T5–T11 逐个 ``include_router`` 挂载。
 
 启动:``uvicorn 'query.api.app:app' --host 127.0.0.1 --port 8770``(``app`` = ``create_app()``)。
 """
