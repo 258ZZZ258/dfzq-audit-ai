@@ -8,8 +8,15 @@ from fastapi.testclient import TestClient
 
 from query.api.app import create_app
 from query.contract import (
-    AnswerBlock, BlockType, Citation, ClauseHit, QueryResult, RegulationHit,
-    RouteType, StructuredResult, TabPayload,
+    AnswerBlock,
+    BlockType,
+    Citation,
+    ClauseHit,
+    QueryResult,
+    RegulationHit,
+    RouteType,
+    StructuredResult,
+    TabPayload,
 )
 from query.retrieve.hybrid import Candidate
 

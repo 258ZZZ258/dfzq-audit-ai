@@ -198,9 +198,9 @@ def _query_response(svc: QueryService, body: BoundaryQueryRequest, scope: dict) 
                 "exhausted_scope": list(result.exhausted_scope),
             },
         }
-    except Exception:
+    except Exception as err:
         # 500 不泄内部细节；统一错误处理器渲染 JSON 错误体。
-        raise ApiError(500, _ERR_INTERNAL, "生成失败")
+        raise ApiError(500, _ERR_INTERNAL, "生成失败") from err
 
 
 def _source_map(candidates: list) -> dict[str, dict]:
