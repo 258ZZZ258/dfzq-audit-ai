@@ -124,3 +124,129 @@
 2. 随机 10 条 `full_text` 与源端按顺序拼接结果逐字一致；
 3. 图片/视频和 `DEL_FLAG='D'` 不进入块文本；
 4. 案例 `LAW_CONTENT_CODE` 仍能命中相同的 `source_code`。
+
+## 2026-07-29 详情冲突边缘样本曾静默失效 + 5434 仿真实例的真实状态
+
+### 造数器:选冲突目标必须问详情表,不能扫主表
+
+正文搬进详情表后 `gen_content_details` 会把**所有**主表 `CONTENT` 清空,于是
+`apply_content_edges` 里原来那个 `or not row["content"]` 守卫失去意义、被一并删掉,只剩
+`is_catalog` 判断。结果它恒选中 `INDEX_NO=0` 的**根节点** —— 根节点正是"非目录 + 无正文",
+详情表里根本没有它,后面按 `law_content_code` 找详情一条都匹配不上,**冲突样本零产出**。
+
+代价不是"少一个样本":`_detail_text_by_content_code` 的 fail-closed 拒收分支从此**没有任何
+数据能走到**(README 早写过"那条路径必须有数据能走到,否则等于没实现"),`verify.py` 的
+`content-conflict` 断言恒红。而当时新增的 `test_mock_source_seed.py` 只断言了"正文搬家",
+单测是绿的 —— 造数器的静默失效不会被只测产物形状的单测抓住。
+
+口径钉子:**冲突目标只从"详情表里真有文本段"的条款里选;选不到就 `raise`**,绝不静默跳过
+——造数器宁可炸,也不能产出"看着正常但少一个边缘"的仿真库。回归测试 (`test_mock_source_seed.py`)
+断言的是**完整导出路径真的抛 `PresegExportError`**,不是只看造数产物里有没有冲突组。
+
+### ⚠ 5434 上那个 mock 实例装的是真语料,不能用 seed.py 重灌
+
+2026-07-29 只读核对 `audit-ai-mock-source` (127.0.0.1:5434 / `dcetl`) 的实际状态,与同事的
+内网复核纪要**不一致**,以实测为准:
+
+| 项 | 实测 |
+|---|---|
+| `LAW_BASIC` | 50 部,全 `SCOPE=0`(无内规) |
+| `LAW_CONTENT` | 1,860 行,`DISTINCT code` 也是 1,860 → **单物理行,未复刻真库双行** |
+| `LAW_CONTENT.CONTENT` | 空的只有 252 行,**1,608 行正文仍在主表** |
+| `LAW_CONTENT_DETAIL` | **0 行** |
+| `CASE_BASIC` / `CASE_PARTY` / `CASE_PUNISH` | 全 0 |
+
+纪要里"主表空正文 1,860 / 详情 1,608"两个数其实都来自主表(总行数 / 带正文行数),标签安错了。
+两个后果:①主表正文非空恒优先 → **详情回退链在这个库上从不触发**,G1 至今没有端到端验证;
+②案例三表空 → 精确桥接同样没数据可验。
+
+**这批数据是真的**(北交所监管指引等真实条文原文),`seed.py` 只会造模板合成文本、**造不回来**。
+而 `seed.py` 开头就 `DROP TABLE`,所以 `verify.py` / `seed.py` **绝不能指向 5434 的 `dcetl`**。
+验证走旁路:同容器内 `CREATE DATABASE dcetl_verify`,`MOCK_SOURCE_DSN` 指过去跑完再 drop
+(本次即如此,13 分支全绿;`dcetl` 未动)。要让这批真语料也能验详情路径,得单独写一个把主表
+正文搬进详情表的迁移脚本,不能靠重新造数。
+
+### 详情回退链的真语料等价验证(不改 `dcetl` 的做法)
+
+`CREATE DATABASE dcetl_dm_shape TEMPLATE dcetl` 克隆一份 → 把 1,608 行主表正文按
+`code → law_content_code`、`CONTENT_ORDER=0/CONTENT_TYPE=0` 搬进详情表并清空主表 → 两个库各导一次:
+
+- `blocks/*.jsonl` **50 个文件逐字节一致**;
+- `manifest.xlsx` 全表一致,**含 `content_hash`**。
+
+即主表路径与详情回退路径在**真语料**上产出等价。这是 G1 第一次被真数据走过(仿真造数只能验兼容路径)。
+克隆库用完即 drop,`dcetl` 全程只读。
+
+## 2026-07-29 集成套件的"干净栈"假设不止 SHA 去重 —— 还包括"Milvus 里没有别的语料"
+
+按"清空 demo 栈 → 重建 → 灌 50 部真语料 → 跑端到端"走完一轮:48/50 INDEXED(2 件因
+`doc_number` manifest 与 L1 抽取冲突停在 META_REVIEW,人工闸按设计工作),1,710 chunk **100% 带
+`source_code`**,`demo verify reconcile` PG↔Milvus 一致,真检索命中相关条款。
+
+模型门控全量 **1176 passed / 3 failed**,3 条**全部**是语料入库导致,非代码缺陷:
+
+| 失败 | 实际原因 |
+|---|---|
+| `test_r2_change_end_to_end` | 变更查询召回到语料里的《可持续发展报告(试行)》,不是本测试的 fixture 版本对 |
+| `test_enumerate_aggregates_across_documents` | citation 落到 `source_format='preseg'` 的真条款,断言 `page_start is not None` 失败 |
+| `test_rerank_bge_hop_real_text` | 候选池被语料挤掉,`bge_ids != none_ids` |
+
+CLAUDE.md 原来只写了"干净栈"是为 **SHA 去重**;这轮暴露出第二种形态:**检索池污染**。尤其
+preseg 件按 CP-010 决策**没有页码**(`page_start` 恒 NULL),任何"引用必带页码"的断言一旦召回到
+preseg 语料就会红。
+
+### 已消除:检索按 dvid 收窄(`conftest.scoped_to`)
+
+不再需要"跑套件前先清库"。查询集成测试改用 `scoped_to` fixture,借 `Retriever.scoped(extra_expr=
+"doc_version_id in [...]")` 把池收窄到测试自己灌的件——**这是边界二本就有的前置过滤机制**,不是为
+测试新加的产品码。只传 `extra_expr` 时 `corpora`/`topk`/`partition_topk`/`include_superseded` 全
+`None` → 回落既有默认,检索行为与不加 scope 等价。
+
+三个文件 7 个测试全部收窄,不止当时红的 3 条:**同文件兄弟测试是侥幸过的**(同样断言"命中必是自己
+的件",只是没被挤掉),只修红的等于留着下次再红。`test_biz_domain_extra_expr_filters_via_milvus`
+的 biz 过滤仍真下推——scope 的 dvid 过滤与 listing 自带 `extra_expr` 由 `_and_expr` 合取(非替换)。
+
+⚠ 用它的前提:scope 内 `scope_active()` 为真,会关掉 `r3_case.attach_cases` 的案例精确反查与
+`r5_judgment` 的引用条款解析(按 PG 身份取数的 widening 桥接)。**断言依赖这两条桥接的测试不能用**。
+
+验收:50 部真语料留在栈里跑模型门控全量 → **1179 passed / 0 failed / 12 skipped**(收窄前同条件
+是 3 failed / 1176 passed)。`scoped_to` 做成 fixture 而非模块级函数:仓根另有 `conftest.py`,
+`from conftest import ...` 在 prepend 导入模式下解析到哪个取决于 sys.path 顺序,歧义且脆。
+
+顺带记一个既有缺口(与本轮无关):`embed_status` 全仓**只有写 `"pending"` 的地方**
+(`s3_structure` / 三个 chunker),没有任何地方写 `"done"`,故 INDEXED 件的该列仍是 `pending`。
+权威嵌入状态看 `chunk_status`(staging/effective)+ reconcile,那两个是对的。
+
+## 2026-07-30 dm_sink(CP-013,反向写)对齐真库正文落点 —— 闭环合上
+
+CP-010 是**读**甲方库,CP-013 是我方文档解析产物**写**回甲方库。7-29 确认正文在详情表后,只改了
+读侧;写侧仍把正文塞 `LAW_CONTENT.CONTENT`,于是我方写回的数据与真库异构——甲方库里同时存在两种
+正文落点,"每个事实单一源"被打破,详情表的同序冲突检测也没法判哪份权威。本次改齐。
+
+### 落点与形态
+
+- 正文进 `ZNFG_IAM_LAW_CONTENT_DETAIL`(`CONTENT_TYPE=0`),`LAW_CONTENT.CONTENT` **恒空串**;
+- **一个 IR 块 = 一个 `CONTENT_ORDER` 段**,不是整条塞进 order 0。该列语义就是"同一条款下的文本
+  片段顺序",款/项各自成段才用得上它;下游按 `\n` 重拼与"整条一段"**逐字等价**,故拆段无损;
+- 详情行 `ID` 由 `snowflake_id(f"{node_code}#{order}")` 派生 —— 与 law/content CODE 同样确定性,
+  重跑同 ID(幂等之根);
+- 仍**只写 1 物理行**(不复刻甲方每节点 2 行的 ETL 缺陷),按-CODE 去重对 1 行同样安全。
+
+### 两个连带必改(漏了就静默出错)
+
+1. **`has_content` 判据**:原来看主表 `CONTENT`,主表恒空后必须改看详情段——否则整批
+   `HAS_CONTENT=0`,下游 `preseg.export` 按"无正文"整件跳过 → **文档静默丢失**。
+   `_plain_groups` 兜底的触发判据(原 `if not any(r["content"])`)同理改成 `if not details`。
+2. **`delete_law` 必须连详情表一起删**。详情行的 `LAW_CONTENT_CODE` 由 `content_code(code, seq)`
+   派生:重跑若节点数变少,旧的高位序号段永远不会被覆盖,却仍按 `LAW_CODE` 被 `preseg.export`
+   读到,拼出**新旧混合的正文**。只删主表看不出问题,直到某次文档变短。
+
+### 验收(真文档,非合成)
+
+`fixtures/batch01` 10 部真文档 → `dm_ingest` 写空库 → 629 条款树节点 / 4,336 正文段;
+主表 `CONTENT` 非空 **0**、`content_type` 全 0、同条款同序重复 **0**、悬空 `LAW_CONTENT_CODE` **0**。
+再 `preseg_export` 读回:545 个带正文条款**逐字一致,零缺失零不符**(CP-013 → CP-010 闭环)。
+重跑一次:计数不变、详情孤儿 0。全仓模型门控 **1184 passed / 0 failed**。
+
+单测里 `test_roundtrips_through_preseg_export_detail_fallback` 把这个闭环钉住:写侧形态一改、
+读侧口径一漂,它就红——两侧不能各自演进。

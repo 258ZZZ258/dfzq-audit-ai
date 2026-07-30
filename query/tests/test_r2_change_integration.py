@@ -107,7 +107,7 @@ def _clean(pg, mio, dvids):
             s.execute(delete(ImportBatch).where(ImportBatch.batch_id.in_(bids)))
 
 
-def test_r2_change_end_to_end(stack, tmp_path, mini_batch, ingest_index):
+def test_r2_change_end_to_end(stack, tmp_path, mini_batch, ingest_index, scoped_to):
     pg, mio, ctx = stack
     d1, m1 = mini_batch(tmp_path, "batch01", OLD_PDF)
     _, old_dvids = ingest_index(pg, ctx, d1, m1)
@@ -120,7 +120,10 @@ def test_r2_change_end_to_end(stack, tmp_path, mini_batch, ingest_index):
         # 226 supersedes 182 → 现行 226、前驱 182
         assert pg.get(DocVersion, new_dvid).supersedes_version_id == old_dvid
 
-        res = answer_change(CHANGE_QUERY, Retriever(ctx.embedding, mio, load_query_config()), pg)
+        # 池收窄到本测试的 182/226 版本对(见 conftest.scoped_to:栈里有真语料时才不被挤占)
+        retr = Retriever(ctx.embedding, mio, load_query_config())
+        with scoped_to(retr, old_dvid, new_dvid):
+            res = answer_change(CHANGE_QUERY, retr, pg)
         assert res.route_type is RouteType.CHANGE
         full = " ".join(b.content for b in res.answer_blocks)
         assert new_dvid in full and old_dvid in full       # 版本对
@@ -136,9 +139,9 @@ def test_r2_change_end_to_end(stack, tmp_path, mini_batch, ingest_index):
         assert c0.page_start is not None            # 页码锚点
 
         # graph 端到端:变更问句 → route_type=change
-        agent = QueryAgent(
-            Retriever(ctx.embedding, mio, load_query_config()), pg, None, load_query_config()
-        )
-        assert agent.ask(CHANGE_QUERY).route_type is RouteType.CHANGE
+        agent_retr = Retriever(ctx.embedding, mio, load_query_config())
+        agent = QueryAgent(agent_retr, pg, None, load_query_config())
+        with scoped_to(agent_retr, old_dvid, new_dvid):
+            assert agent.ask(CHANGE_QUERY).route_type is RouteType.CHANGE
     finally:
         _clean(pg, mio, [old_dvid, new_dvid])

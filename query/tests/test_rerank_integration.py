@@ -29,26 +29,33 @@ def _retriever(indexed_stack, qcfg, reranker=None):
     return Retriever(indexed_stack.ctx.embedding, indexed_stack.mio, qcfg, reranker=reranker)
 
 
-def test_rerank_none_equivalent_real(indexed_stack):
+def _retrieve(scoped_to, indexed_stack, qcfg, reranker=None):
+    """检索,池收窄到本 fixture 的件(见 conftest.scoped_to:栈里有真语料时才不被挤占)。"""
+    retr = _retriever(indexed_stack, qcfg, reranker=reranker)
+    with scoped_to(retr, indexed_stack.dvid):
+        return retr.retrieve(indexed_stack.query)
+
+
+def test_rerank_none_equivalent_real(indexed_stack, scoped_to):
     qcfg = load_query_config()  # rerank_backend=none(默认)
-    out = _retriever(indexed_stack, qcfg).retrieve(indexed_stack.query)
+    out = _retrieve(scoped_to, indexed_stack, qcfg)
     assert out, "应检索到 ingest 的合同件条款"
     assert all(c.text is None for c in out)  # with_text=False → 无 text 开销
     # 终态 = RRF 分降序(rerank=none passthrough 等价)
     assert [c.score for c in out] == sorted((c.score for c in out), reverse=True)
 
 
-def test_rerank_bge_hop_real_text(indexed_stack):
+def test_rerank_bge_hop_real_text(indexed_stack, scoped_to):
     # rerank=bge + 注入反转 fake reranker:候选带真 Milvus text + reranker 真应用(无需本地模型)
     qcfg = load_query_config().model_copy(update={"rerank_backend": "bge"})
     rev = SimpleNamespace(
         rerank=lambda q, cands: list(reversed(cands)),
         rerank_scored=lambda q, cands: [(c, 0.5) for c in reversed(cands)],
     )
-    bge_out = _retriever(indexed_stack, qcfg, reranker=rev).retrieve(indexed_stack.query)
+    bge_out = _retrieve(scoped_to, indexed_stack, qcfg, reranker=rev)
     assert bge_out, "应检索到条款"
     assert any(c.text for c in bge_out), "with_text=True → 候选带真 Milvus 截断 text(检索-重排一跳)"
-    none_out = _retriever(indexed_stack, load_query_config()).retrieve(indexed_stack.query)
+    none_out = _retrieve(scoped_to, indexed_stack, load_query_config())
     none_ids = [c.chunk_id for c in none_out]
     bge_ids = [c.chunk_id for c in bge_out]
     assert set(bge_ids) == set(none_ids)        # 同池(本件 pool ≤ topk)
@@ -59,8 +66,7 @@ def test_rerank_bge_hop_real_text(indexed_stack):
     not os.environ.get("QUERY_RERANK_MODEL"),
     reason="未设 QUERY_RERANK_MODEL(本地 bge-reranker-v2-m3);真重排跳过(绝不联网)",
 )
-def test_rerank_bge_real_model(indexed_stack):
+def test_rerank_bge_real_model(indexed_stack, scoped_to):
     qcfg = load_query_config().model_copy(update={"rerank_backend": "bge"})
-    retr = _retriever(indexed_stack, qcfg, reranker=BGEReranker(qcfg.rerank_model))
-    out = retr.retrieve(indexed_stack.query)
+    out = _retrieve(scoped_to, indexed_stack, qcfg, reranker=BGEReranker(qcfg.rerank_model))
     assert out and any(c.text for c in out)     # 真 reranker 跑通,候选带 text

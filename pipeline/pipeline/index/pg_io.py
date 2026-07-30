@@ -148,9 +148,16 @@ class PgIO:
             s.add_all(chunks)
 
     def write_cold_vectors(self, updates: dict[str, tuple[bytes, bytes | None]]) -> None:
-        """写 chunks 冷备向量:``{chunk_id: (dense_bytes, sparse_bytes|None)}``(s5 embed 阶段)。
+        """写 chunks 冷备向量 + 置 ``embed_status='done'``(s5 embed 阶段)。
 
-        ``sparse_bytes=None``:bm25/none 后端 sparse 免冷存(Milvus BM25 从 text 重算,CP-012)。
+        ``{chunk_id: (dense_bytes, sparse_bytes|None)}``;``sparse_bytes=None``:bm25/none 后端
+        sparse 免冷存(Milvus BM25 从 text 重算,CP-012)。
+
+        **``embed_status`` 与冷备同事务写**(§8.1 pending|done|failed):冷备落库正是"该块已嵌入"
+        的持久证据,分开写会在中途崩时留下"有冷备却仍 pending"的漂移。
+        ⚠ parent 块(节级,仅 PG 不入 Milvus)不经本路径 → 恒 ``pending``:它们本就不是嵌入对象,
+        而 §8.1 的值域里没有"不适用",故保守留 pending 而非谎报 done。``failed`` 暂无写入方:
+        嵌入失败是整批抛错、文档落错误态,没有单块粒度的失败归因。
         """
         with self.session() as s:
             for chunk_id, (dense_b, sparse_b) in updates.items():
@@ -158,6 +165,7 @@ class PgIO:
                 if c is not None:
                     c.dense_vec_cold = dense_b
                     c.sparse_vec_cold = sparse_b
+                    c.embed_status = "done"
 
     def set_chunk_status(self, doc_version_id: str, status: str) -> None:
         """翻转某文档全部 chunk 的 chunk_status(s5 index:staging→effective/upcoming)。"""

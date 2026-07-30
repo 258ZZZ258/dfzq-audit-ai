@@ -6,10 +6,11 @@ from datetime import datetime
 
 import pytest
 
-from common.ir import Block, BlockType
+from common.ir import Block, BlockType, Table, TableCell
 from pipeline.chunking.clause_tree import build_tree
 from pipeline.dm_sink.codes import content_code, law_code, snowflake_id
 from pipeline.dm_sink.mapper import DmSinkError, levels_of, map_document
+from pipeline.preseg.export import blocks_from_contents
 
 NOW = datetime(2026, 7, 27, 10, 0, 0)
 
@@ -30,6 +31,30 @@ def blocks_of(*texts: str) -> list[Block]:
 def build(texts: list[str], row: dict | None = None):
     bs = blocks_of(*texts)
     return map_document({**BASE_ROW, **(row or {})}, bs, build_tree(bs), now=NOW)
+
+
+def body_of(dm, code: str) -> str:
+    """某条款节点的正文 = 其详情段按 CONTENT_ORDER 拼接(与 preseg.export 的读法同口径)。"""
+    segs = sorted(
+        (d for d in dm.content_details if d["law_content_code"] == code),
+        key=lambda d: d["content_order"],
+    )
+    return "\n".join(d["content"] for d in segs)
+
+
+def bodies(dm) -> dict[str, str]:
+    """条款标识 → 正文(只取有正文的节点)。"""
+    out = {}
+    for r in dm.contents:
+        text = body_of(dm, r["code"])
+        if text:
+            out[r["title"]] = text
+    return out
+
+
+def _upper(rows: list[dict]) -> list[dict]:
+    """dm_sink 行(小写键,直接落库)→ 转换层认的大写键(DmSource._rows 的归一)。"""
+    return [{k.upper(): v for k, v in r.items()} for r in rows]
 
 
 # ── 标识生成:确定性 = 幂等之根 ────────────────────────────────────────────
@@ -73,25 +98,79 @@ def test_root_node_then_catalog_then_articles():
     assert rows[0]["index_no"] == 0
     assert rows[0]["is_catalog"] == 0 and rows[0]["title"] == "" and rows[0]["content"] == ""
     assert rows[1]["is_catalog"] == 1 and "第一章" in rows[1]["title"]
-    arts = [r for r in rows if r["is_catalog"] == 0 and r["content"]]
-    assert [r["title"] for r in arts] == ["第一条", "第二条"]
+    assert list(bodies(dm)) == ["第一条", "第二条"]
 
 
 def test_article_title_is_bare_label_not_body():
     """小数编号体例的条标题行**就是正文段落**,TITLE 只能放标识 —— 否则下游推导器必失配。"""
     dm = build(["第一章 总则", "1.1 为了规范本所股票上市,根据有关规定,制定本规则。"])
-    art = next(r for r in dm.contents if r["is_catalog"] == 0 and r["content"])
+    art = next(r for r in dm.contents if body_of(dm, r["code"]))
     assert art["title"] == "1.1"
-    assert "为了规范" in art["content"], "正文须完整落在 CONTENT"
+    assert "为了规范" in body_of(dm, art["code"]), "正文须完整落在详情表"
     assert "为了规范" not in art["title"]
 
 
 def test_path_code_catalog_self_article_prefixed():
     dm = build(["第一章 总则", "第一条 正文内容甲乙丙。"])
     cat = next(r for r in dm.contents if r["is_catalog"] == 1)
-    art = next(r for r in dm.contents if r["is_catalog"] == 0 and r["content"])
+    art = next(r for r in dm.contents if body_of(dm, r["code"]))
     assert cat["path_code"] == cat["code"], "章的 PATH_CODE = 自身 CODE(同甲方,不串祖先链)"
     assert art["path_code"] == f"{cat['code']}.{art['code']}"
+
+
+# ── 正文落点:与真库同构(主表空,正文在 LAW_CONTENT_DETAIL)────────────────
+
+
+def test_main_content_is_blank_and_body_lives_in_detail_table():
+    """真库在册 LAW_CONTENT.CONTENT 几乎全空、正文在详情表(2026-07-29 内网复核)。
+
+    我方写回甲方库必须同构:否则甲方库里同时存在两种正文落点,而"每个事实单一源"被打破,
+    详情表的同序冲突检测也没法判哪份权威。
+    """
+    dm = build(["第一章 总则", "第一条 甲乙丙。", "第二条 丁。"])
+    assert all(r["content"] == "" for r in dm.contents), "主表正文一律置空"
+    assert bodies(dm) == {"第一条": "第一条 甲乙丙。", "第二条": "第二条 丁。"}
+    assert all(d["content_type"] == 0 for d in dm.content_details), "纯文本段恒 CONTENT_TYPE=0"
+    assert all(d["del_flag"] == "A" for d in dm.content_details)
+
+
+def test_detail_segments_are_per_block_and_ordered():
+    """CONTENT_ORDER = 同一条款下的文本片段顺序 —— 款/项各自成段,不塞成一坨。"""
+    dm = build(["第一条 甲乙丙。", "(一)子项一。", "(二)子项二。"])
+    art = next(r for r in dm.contents if body_of(dm, r["code"]))
+    segs = sorted(
+        (d for d in dm.content_details if d["law_content_code"] == art["code"]),
+        key=lambda d: d["content_order"],
+    )
+    assert [d["content_order"] for d in segs] == [0, 1, 2], "顺序号从 0 连续"
+    assert [d["content"] for d in segs] == ["第一条 甲乙丙。", "(一)子项一。", "(二)子项二。"]
+    assert all(d["law_code"] == dm.code for d in segs)
+
+
+def test_detail_ids_deterministic_across_runs():
+    """幂等之根:同文档两次映射产出同一批详情 ID(写库按 CODE 覆盖才不堆重复)。"""
+    a, b = build(["第一条 甲。", "第二条 乙。"]), build(["第一条 甲。", "第二条 乙。"])
+    assert [d["id"] for d in a.content_details] == [d["id"] for d in b.content_details]
+    assert len({d["id"] for d in a.content_details}) == len(a.content_details), "ID 不得撞"
+
+
+def test_roundtrips_through_preseg_export_detail_fallback():
+    """CP-013 → CP-010 闭环:我方写达梦(正文进详情表)→ preseg 导出按详情回退读回。
+
+    读回的块文本必须与映射前的段落逐字一致 —— 否则写库形态与读库口径对不上,
+    整条"文档解析 → 达梦 → 回灌 PG/Milvus"的链路会在正文上失真。
+    """
+    dm = build(["第一章 总则", "第一条 甲乙丙。", "(一)子项一。", "(二)子项二。", "第二条 丁。"])
+    blocks = blocks_from_contents(
+        _upper(dm.contents), [], content_details=_upper(dm.content_details)
+    )
+    got = {b["clause_label"]: b["text"] for b in blocks if not b["is_catalog"]}
+    assert got == {
+        "第一条": "第一条 甲乙丙。\n(一)子项一。\n(二)子项二。",
+        "第二条": "第二条 丁。",
+    }
+    # 章节标题块仍靠 TITLE 兜底成块(主表正文为空不影响它)
+    assert [b["text"] for b in blocks if b["is_catalog"]] == ["第一章 总则"]
 
 
 def test_index_no_is_contiguous_preorder():
@@ -112,16 +191,27 @@ def test_每节点只写一行():
 def test_plain_document_falls_back_to_paragraph_nodes():
     """无「第X条」体例(实测真语料 22% 如此):须切出正文节点,否则下游按无正文整件跳过。"""
     dm = build(["关于发布业务办理指南的公告", "一、办理流程如下。", "二、材料要求如下。"])
-    bodies = [r for r in dm.contents if r["is_catalog"] == 0 and r["content"]]
-    assert bodies, "无条款体文档也必须产出正文节点"
-    assert dm.law["has_content"] == 1
-    assert "办理流程" in "\n".join(r["content"] for r in bodies)
+    bodied = [r for r in dm.contents if body_of(dm, r["code"])]
+    assert bodied, "无条款体文档也必须产出正文节点"
+    assert dm.law["has_content"] == 1, "has_content 须按详情表判,不能再看主表 CONTENT"
+    assert "办理流程" in "\n".join(body_of(dm, r["code"]) for r in bodied)
 
 
 def test_plain_fallback_groups_by_token_budget():
     dm = build(["公告标题", *[f"第{i}段正文内容。" * 40 for i in range(6)]],)
-    bodies = [r for r in dm.contents if r["is_catalog"] == 0 and r["content"]]
-    assert len(bodies) > 1, "超预算须拆成多个节点,不塞成一个巨块"
+    bodied = [r for r in dm.contents if body_of(dm, r["code"])]
+    assert len(bodied) > 1, "超预算须拆成多个节点,不塞成一个巨块"
+
+
+def test_has_content_zero_when_no_body_at_all():
+    """只有表格 → 正文段为空 → HAS_CONTENT=0(甲方据此判有无正文;表格不进纯文本正文)。"""
+    table = Table(n_rows=1, n_cols=2, cells=[
+        TableCell(text="表头", row=0, col=0), TableCell(text="表体", row=0, col=1),
+    ])
+    bs = [Block(index=0, type=BlockType.TABLE, text="表头|表体", table=table)]
+    dm = map_document(BASE_ROW, bs, build_tree(bs), now=NOW)
+    assert dm.content_details == [], "表格块不产出正文段"
+    assert dm.law["has_content"] == 0
 
 
 # ── LAW_BASIC ────────────────────────────────────────────────────────────
