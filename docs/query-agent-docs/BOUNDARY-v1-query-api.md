@@ -1,19 +1,24 @@
 # audit-biz 调用 audit-ai 查询接口(边界二)说明
 
-> 本文件是 audit-ai 侧的**落地/联调说明**。接口契约主本仍以 audit-biz 仓
-> `docs/audit-biz-docs/openapi/boundary.v1.yaml`(v1.1.0)为准;本文与主本冲突时以主本为准。
-> 相关红线见本仓 `docs/query-agent-docs/BOUNDARY-biz-contract-pointer.md`。
+> **本文件描述 `routes_boundary.py` 的当前实际行为**,与代码同步维护。
+>
+> ⚠ **与 biz 仓 `boundary.v1.yaml`(v1.2.0)存在已知差异,且本文为准**:该 yaml 仍把 `/v1/query`
+> 定为 SSE,而 javainit ↔ audit-ai 联调已当面谈定改用一次性 JSON(2026-07 决策)。这违反
+> 「契约单一源在 biz、本仓照做」的常规流程,是**待回灌**状态而非新口径——回灌清单见文末
+> 「yaml 待回灌清单」,回灌后本节改回「以主本为准」。红线见 `BOUNDARY-biz-contract-pointer.md`。
 
 ## 一句话
 
-Java 后端调用 Python `audit-ai` 的**无状态、无身份**制度查询热路径，使用一次性 JSON:
+Java 后端调用 Python `audit-ai` 的**无状态、无身份**制度查询热路径,使用一次性 JSON:
 
 ```text
-POST /v1/query          # 只给 Java 后端调用;前端页面接口仍是 /api/query/v1/*(不受本接口影响)
-POST /v1/cases/{case_id} # 查询结果中的案例详情回查，同样只给 Java 调用
-POST /v1/dm/clauses/{source_code} # 条款/监管规则命中的达梦源库全文回查，同样只给 Java 调用
+POST /v1/query                    # 制度查询热路径;前端页面接口仍是 /api/query/v1/*(不受本接口影响)
+POST /v1/cases/{case_id}          # 案例详情回查(读 audit-ai PG)
+POST /v1/clauses/{clause_id}      # 条款详情回查(读 audit-ai PG,四级锚点 + 全文 + 节级父块)
+POST /v1/dm/clauses/{source_code} # 条款全文回查(读达梦源库,非 audit-ai PG)
 ```
 
+四个端点**都只给 Java 后端调用**,都要 `X-Internal-Token`。
 实现:`query/query/api/routes_boundary.py`(薄壳 over `QueryAgent.ask`,不改 AI 内核)。
 
 ## 鉴权(无身份)
@@ -70,7 +75,7 @@ schema 接入项目语料后一并放开(去掉 `_build_scope` 的守卫 + 加 `
 ```json
 {
   "meta": {"request_id": "REQ-...", "route_type": "evidence", "ai_label": true,
-            "review_required": false, "export_enabled": true},
+            "review_required": false, "export_enabled": true, "elapsed_ms": 1234},
   "answer_blocks": [{"block_seq": 0, "block_type": "text", "content": "..."}],
   "citations": [{"clause_id": "...", "chunk_id": "...", "score": 0.91,
                  "source_code": "...", "source_doc_id": "..."}],
@@ -84,6 +89,7 @@ schema 接入项目语料后一并放开(去掉 `_build_scope` 的守卫 + 加 `
 }
 ```
 
+- `meta.elapsed_ms`：本次请求在 audit-ai 侧的耗时(毫秒,`time.perf_counter` 测量,含两次检索)。
 - `answer_blocks`：答案块，`block_seq` 供 Java/前端保持顺序，`content` 为完整正文。
 - `citations`：轻量引用。`clause_id`(=`chunk_id`)是回查主键；`source_code` 和 `source_doc_id`
   可为空，供 Java 侧授权回查时使用。拒答/闲聊等无引用的路由返回空数组。
@@ -95,16 +101,27 @@ schema 接入项目语料后一并放开(去掉 `_build_scope` 的守卫 + 加 `
 
 - `citation.score`:per-hit 检索融合分,min-max 归一到 0–1,与前端 structured「匹配度」**同口径**
   (`structured.make_normalizer`)。**从 ask 的同一次检索候选派生**(经 `Retriever.scoped(collector=...)`
-  收集),**不做二次检索**,无候选集漂移。契约 `nullable`:极少数自建候选的路由取不到分 → `null`,biz 降级不显。
+  收集),不为取分而额外检索,故与答案引用无候选集漂移。契约 `nullable`:极少数自建候选的路由取不到分
+  → `null`,biz 降级不显。
+
+### 每次请求做两次检索(`structured` 引入)
+
+`_query_response` 先在 `scoped(collector=...)` 内跑 `agent.ask`(答案 + 引用 + 分数),**再另开一个
+`scoped()` 跑 `structured_for`** 装配四 Tab —— 一次请求两次 Milvus 检索,延迟与检索成本约翻倍。
+
+⚠ 这与 yaml v1.2.0 及本文早期措辞的「不二次检索」不符,**以本节为准**。两次检索都在 Java 下传的
+**同一** `corpus_types`/`perm_tags` 前置过滤内(前置过滤红线不破);`citation.score` 仍只取第一次的
+候选,故引用与分数同源。若日后要压回一次,得让 `structured` 复用第一次的 collector 候选(另议)。
 
 ### JSON 错误响应
 
 生成失败返回 HTTP `500`：`{"error": {"code": "B105", "message": "生成失败"}}`
 (不泄内部细节，堆栈进日志/trace)。
 
-> **契约已登记**:`B105`(查询热路径内部错误,服务向)同 `B104` 属 B1xx **服务向**段,已在契约单一源
-> 登记(biz `boundary.v1.yaml` QueryErrorEvent + `SPEC-BOUNDARY.md §3.3`,audit-biz PR#6)。
-> 合并顺序:biz 登记先行 → 本仓照做;biz 定稿码不同则本仓照改。回灌 v0.4 §8.3 为 biz 侧合并后待办。
+> **码已登记,载体已变**:`B105`(查询热路径内部错误,服务向)同 `B104` 属 B1xx **服务向**段,已在
+> biz `boundary.v1.yaml` + `SPEC-BOUNDARY.md §3.3` 登记(audit-biz PR#6)。但 yaml 把它挂在
+> **`QueryErrorEvent`(SSE 事件)** 下;改 JSON 后它走的是 HTTP 500 的统一 JSON 错误体。
+> **码值不变、载体待回灌**(见文末清单)。
 
 ## 前置过滤覆盖:关掉按身份取数的 widening 桥接
 
@@ -125,12 +142,18 @@ scope → 照走,byte 等价):
 本接口与前端向 `/api/query/v1/*` **完全独立**:无会话落库、无导出、无 PG 引用回查装配。
 前端接口的结构化载荷契约(`contract.py` 各 Hit)**不受本接口影响**、保持不变。
 
-## 已知限制:热路径的 PG 依赖
+## 已知限制:热路径的 PG 依赖(现已扩大)
 
 薄壳复用 `QueryAgent.ask`(不改内核),而生成正文依赖 PG **权威全文**(§7.3,非 Milvus 截断),
-故边界热路径**仍读 PG**——与 boundary.v1.yaml「在线热路径不依赖 PG」措辞不符。红线本身(引用四级回查
-归 Java)已守:边界只回 `clause_id`。此为「薄壳不改内核」决策的既定残余,**待 biz yaml 修正措辞**
-或本仓抽只读检索路(另议),本 PR 不改内核。
+故边界热路径**仍读 PG**——与 boundary.v1.yaml「在线热路径不依赖 PG」措辞不符。
+
+**范围比原先大**:`structured_for` 还会 `fetch_pg_context` 回查 chunk→doc 与案例行来装配四 Tab;
+`/v1/cases/{case_id}` 与 `/v1/clauses/{clause_id}` 更是**直接**以 PG 为数据源。也就是说
+「audit-ai 在线不依赖 PG」在当前实现下**整体不成立**,不再只是生成路径的残余。
+
+红线本身仍守:**引用的四级定位由 Java 收口**——`/v1/query` 只回 `clause_id` + 轻量键,不在查询响应里
+自行装配四级引用;`/v1/clauses` 是 Java **显式发起**、带 `perm_tags` 再校验的独立回查,不是 audit-ai
+自作主张地 widening(区别见下节)。措辞待 biz yaml 修正,或本仓抽只读检索路(另议)。
 
 ## 本地联调
 
@@ -180,3 +203,46 @@ audit-ai 按两个源 CODE 直读 `ZNFG_IAM_LAW_CONTENT JOIN ZNFG_IAM_LAW_BASIC`
 `PRESEG_SOURCE_DSN` 获取（本地为 PG 仿真、内网为达梦）。成功时返回完整 `full_text`（并保留兼容字段
 `text`）和源文档元数据，不能以结构化检索中的 140 字 `snippet` 或 `core_requirement` 代替原文。Java
 不得接受浏览器传来的源 CODE，缓存缺失/过期必须提示重新查询，不能回退到 audit-ai PG 条款端点。
+
+**主表空正文时回退详情表**:`dm_clause_detail` 与 `preseg.export` 同口径——`LAW_CONTENT.CONTENT`
+为空则读 `LAW_CONTENT_DETAIL` 的 `CONTENT_TYPE=0` 段、按 `CONTENT_ORDER`/`ID` 拼接。真库在册主表正文
+几乎全空(2026-07-29 内网复核),没有这条回退 `full_text` 恒空。详见 `docs/preseg-docs/preseg_devlog.md`。
+
+## audit-ai PG 条款详情回查
+
+```text
+POST /v1/clauses/{clause_id}
+X-Internal-Token: <令牌>
+Content-Type: application/json
+
+{"filters":{"perm_tags":["公开"]}}
+```
+
+`clause_id` = `chunk_id`。返回四级锚点(`clause_detail` 走 `generate/anchors`)+ `full_text`
+(`chunks.text` 权威全文,并保留兼容字段 `text`)+ `parent_text`(节级父块)。
+
+与上一节的**达梦**回查是两条不同数据源:本端点读 **audit-ai PG**,达梦端点读**源库**。命中来自达梦
+预切块语料时优先用 `/v1/dm/clauses`(源库为准);本端点覆盖非达梦来源的语料。
+
+`perm_tags` 由 Java 下传并在 PG 侧**再次校验**(比对 `doc_versions.perm_tag`);**不存在与越权一律
+`404`**,不区分——否则详情端点会变成受限条款的存在性探测器。案例端点同此口径。
+
+## yaml 待回灌清单(biz `boundary.v1.yaml` v1.2.0 → 下一版)
+
+当前代码与契约单一源的**全部**差异,逐条列出以便一次性回灌(改 biz 的 yaml 是**另一个仓的 PR**,
+本仓不代改;biz 仓本机副本当前在他人特性分支上,更不宜代动):
+
+| # | yaml v1.2.0 现状 | 代码实际 |
+|---|---|---|
+| 1 | `/v1/query` 200 响应 = `text/event-stream`,`SseEventEnvelope`(`meta`/`delta`/`citation`/`done`/`error` 事件序) | `application/json` 一次性返回 `{meta, answer_blocks, citations, structured, completion}` |
+| 2 | `meta` 无 `elapsed_ms` | 有 `meta.elapsed_ms`(整数毫秒) |
+| 3 | 无 `structured` | 有 `structured`(四 Tab 结构化命中,`StructuredResult.to_dict()`) |
+| 4 | `B105` 挂在 `QueryErrorEvent`(SSE 事件) | 走 HTTP 500 的统一 JSON 错误体,码值不变 |
+| 5 | 未定义 `/v1/cases/{case_id}` | 已实现,body `{filters:{perm_tags}}`,404 兼表"不存在/越权" |
+| 6 | 未定义 `/v1/clauses/{clause_id}` | 同上,返回四级锚点 + `full_text` + `parent_text` |
+| 7 | 未定义 `/v1/dm/clauses/{source_code}` | 已实现,body `{source_doc_id}`,读 `PRESEG_SOURCE_DSN` 源库 |
+| 8 | 描述称「在线热路径不依赖 PG」 | 不成立:生成正文、`structured` 装配、两个详情端点都读 PG(见上节) |
+| 9 | 描述隐含单次检索 | 每次 `/v1/query` 做**两次**检索(答案 + structured) |
+
+回灌后:把本文顶部的「本文为准」改回「以主本为准」,并同步
+[`BOUNDARY-biz-contract-pointer.md`](BOUNDARY-biz-contract-pointer.md) 的版本号与状态。
