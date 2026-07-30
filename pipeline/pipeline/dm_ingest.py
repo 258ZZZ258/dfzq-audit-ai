@@ -74,7 +74,7 @@ def run(doc_dir: Path, manifest: Path, limit: int | None) -> int:
     now = datetime.now()
 
     ok, skipped, failed = 0, [], []
-    n_content = 0
+    n_content = n_detail = 0
     engine = create_engine(dsn)
     with engine.begin() as conn:
         writer = DmWriter(conn)
@@ -95,8 +95,12 @@ def run(doc_dir: Path, manifest: Path, limit: int | None) -> int:
             writer.write(dm)
             ok += 1
             n_content += len(dm.contents)
+            n_detail += len(dm.content_details)
 
-    print(f"✓ 写入达梦:法规 {ok} 部 · 条款树节点 {n_content} 行")
+    print(
+        f"✓ 写入达梦:法规 {ok} 部 · 条款树节点 {n_content} 行 · 正文段 {n_detail} 行"
+        f"(正文在 LAW_CONTENT_DETAIL,主表 CONTENT 恒空——与真库同构)"
+    )
     for s in skipped:
         print(f"  ⨯ 跳过:{s}")
     for f in failed:

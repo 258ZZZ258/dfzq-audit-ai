@@ -216,3 +216,37 @@ preseg 语料就会红。
 顺带记一个既有缺口(与本轮无关):`embed_status` 全仓**只有写 `"pending"` 的地方**
 (`s3_structure` / 三个 chunker),没有任何地方写 `"done"`,故 INDEXED 件的该列仍是 `pending`。
 权威嵌入状态看 `chunk_status`(staging/effective)+ reconcile,那两个是对的。
+
+## 2026-07-30 dm_sink(CP-013,反向写)对齐真库正文落点 —— 闭环合上
+
+CP-010 是**读**甲方库,CP-013 是我方文档解析产物**写**回甲方库。7-29 确认正文在详情表后,只改了
+读侧;写侧仍把正文塞 `LAW_CONTENT.CONTENT`,于是我方写回的数据与真库异构——甲方库里同时存在两种
+正文落点,"每个事实单一源"被打破,详情表的同序冲突检测也没法判哪份权威。本次改齐。
+
+### 落点与形态
+
+- 正文进 `ZNFG_IAM_LAW_CONTENT_DETAIL`(`CONTENT_TYPE=0`),`LAW_CONTENT.CONTENT` **恒空串**;
+- **一个 IR 块 = 一个 `CONTENT_ORDER` 段**,不是整条塞进 order 0。该列语义就是"同一条款下的文本
+  片段顺序",款/项各自成段才用得上它;下游按 `\n` 重拼与"整条一段"**逐字等价**,故拆段无损;
+- 详情行 `ID` 由 `snowflake_id(f"{node_code}#{order}")` 派生 —— 与 law/content CODE 同样确定性,
+  重跑同 ID(幂等之根);
+- 仍**只写 1 物理行**(不复刻甲方每节点 2 行的 ETL 缺陷),按-CODE 去重对 1 行同样安全。
+
+### 两个连带必改(漏了就静默出错)
+
+1. **`has_content` 判据**:原来看主表 `CONTENT`,主表恒空后必须改看详情段——否则整批
+   `HAS_CONTENT=0`,下游 `preseg.export` 按"无正文"整件跳过 → **文档静默丢失**。
+   `_plain_groups` 兜底的触发判据(原 `if not any(r["content"])`)同理改成 `if not details`。
+2. **`delete_law` 必须连详情表一起删**。详情行的 `LAW_CONTENT_CODE` 由 `content_code(code, seq)`
+   派生:重跑若节点数变少,旧的高位序号段永远不会被覆盖,却仍按 `LAW_CODE` 被 `preseg.export`
+   读到,拼出**新旧混合的正文**。只删主表看不出问题,直到某次文档变短。
+
+### 验收(真文档,非合成)
+
+`fixtures/batch01` 10 部真文档 → `dm_ingest` 写空库 → 629 条款树节点 / 4,336 正文段;
+主表 `CONTENT` 非空 **0**、`content_type` 全 0、同条款同序重复 **0**、悬空 `LAW_CONTENT_CODE` **0**。
+再 `preseg_export` 读回:545 个带正文条款**逐字一致,零缺失零不符**(CP-013 → CP-010 闭环)。
+重跑一次:计数不变、详情孤儿 0。全仓模型门控 **1184 passed / 0 failed**。
+
+单测里 `test_roundtrips_through_preseg_export_detail_fallback` 把这个闭环钉住:写侧形态一改、
+读侧口径一漂,它就红——两侧不能各自演进。
