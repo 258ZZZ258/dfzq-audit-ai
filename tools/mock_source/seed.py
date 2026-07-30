@@ -310,7 +310,7 @@ EDGE_LAWS = [
     ("delflag-u", "DEL_FLAG=U 修改态 → 仍视为在册(LIVE_DEL_FLAGS)", {"del_flag": "U"}),
     # 下面两条的边缘在 LAW_CONTENT 侧,由 apply_content_edges 后处理制造
     ("no-content", "在册法规但一条正文都没有 → 无正文跳过", {"has_content": 0}),
-    ("content-conflict", "同 CODE 两物理行内容不一致 → 无法判权威版,拒收整部法规", {}),
+    ("content-conflict", "详情表同条款同顺序两段正文不一致 → 无法判权威版,拒收整部法规", {}),
 ]
 
 
@@ -327,21 +327,23 @@ def apply_content_edges(
     out = [r for r in contents if r["law_code"] != no_content]
     out_details = [r for r in content_details if r["law_code"] != no_content]
     if conflict:
-        target_code = None
-        for row in out:
-            if row["law_code"] != conflict or row["is_catalog"]:
-                continue
-            target_code = row["code"]
-            break
-        for detail in out_details:
-            if detail["law_content_code"] != target_code or detail["content_type"] != 0:
-                continue
-            out_details.append({
-                **detail,
-                "id": f"{detail['id']}C",
-                "content": detail["content"] + "(同顺序冲突样本)",
-            })
-            break
+        # ⚠ 目标只能从**详情表里真有文本段**的条款里选,不能扫主表挑"首个非目录行":正文搬走后
+        #   主表 CONTENT 恒为空,而 INDEX_NO=0 的根节点正是"非目录 + 无正文"(详情表里没有它),
+        #   选中它则一条冲突都造不出来 —— 拒收分支静默无数据可走,等于没实现。
+        src = next(
+            (d for d in out_details
+             if d["law_code"] == conflict and d["content_type"] == 0 and d["content"]),
+            None,
+        )
+        if src is None:  # 造数器自身失真 → 立刻报错,绝不产出"看着正常但少一个边缘"的仿真库
+            raise RuntimeError(
+                f"content-conflict 边缘法规 {conflict} 在详情表无文本段,造不出同顺序冲突样本"
+            )
+        out_details.append({
+            **src,
+            "id": f"{src['id']}C",  # 同 LAW_CONTENT_CODE + 同 CONTENT_ORDER、异 ID 异正文
+            "content": src["content"] + "(同顺序冲突样本)",
+        })
     return out, out_details
 
 
