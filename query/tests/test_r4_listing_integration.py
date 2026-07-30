@@ -38,9 +38,11 @@ def _titles(res):
     return {row[0] for row in _table_rows(res)["rows"]}  # 列 0 = 制度名称
 
 
-def test_enumerate_aggregates_across_documents(enumerate_stack):
+def test_enumerate_aggregates_across_documents(enumerate_stack, scoped_to):
     es = enumerate_stack
-    res = answer_enumerate("哪些制度规定了信息披露", _retr(es), es.pg)
+    retr = _retr(es)
+    with scoped_to(retr, es.dvid_a, es.dvid_b):  # 池收窄到本 fixture 两件(见 conftest.scoped_to)
+        res = answer_enumerate("哪些制度规定了信息披露", retr, es.pg)
     assert res.route_type is RouteType.ENUMERATE
     titles = _titles(res)
     # 两件同主题制度各成一行(跨文档聚合)
@@ -53,27 +55,33 @@ def test_enumerate_aggregates_across_documents(enumerate_stack):
     assert cit.clause_path and cit.page_start is not None and cit.status == "effective"
 
 
-def test_obligation_filter_drops_non_obligation_doc(enumerate_stack):
+def test_obligation_filter_drops_non_obligation_doc(enumerate_stack, scoped_to):
     es = enumerate_stack
+    retr = _retr(es)
     # 义务意图查询("要求")→ E1 后过滤:doc_b 无义务标 → 剔除;doc_a(应当条款)保留
-    res = answer_enumerate("列出所有关于信息披露的要求", _retr(es), es.pg)
+    with scoped_to(retr, es.dvid_a, es.dvid_b):
+        res = answer_enumerate("列出所有关于信息披露的要求", retr, es.pg)
     assert res.route_type is RouteType.ENUMERATE
     titles = _titles(res)
     assert "信息披露管理办法" in titles          # 含义务条款 → 保留
     assert "信息披露事务管理细则" not in titles    # 无义务标 → E1 过滤剔除
 
 
-def test_biz_domain_extra_expr_filters_via_milvus(enumerate_stack):
+def test_biz_domain_extra_expr_filters_via_milvus(enumerate_stack, scoped_to):
     es = enumerate_stack
+    retr = _retr(es)
     # 正:biz_domain code 命中 → 列举有结果(extra_expr 经真 Milvus 过滤,不误杀)
-    pos = answer_enumerate(
-        f"哪些制度规定了{es.biz_code}信息披露", _retr(es), es.pg, biz_terms=[es.biz_code]
-    )
+    # scope 的 dvid 过滤与 listing 自带的 biz extra_expr 由 `_and_expr` 合取,biz 过滤仍真下推
+    with scoped_to(retr, es.dvid_a, es.dvid_b):
+        pos = answer_enumerate(
+            f"哪些制度规定了{es.biz_code}信息披露", retr, es.pg, biz_terms=[es.biz_code]
+        )
     assert pos.route_type is RouteType.ENUMERATE
     assert "信息披露管理办法" in _titles(pos)
     # 负:不存在的 biz_domain code → Milvus 过滤后 0 命中 → 覆盖拒答(证 extra_expr 真下推 Milvus)
-    neg = answer_enumerate(
-        "哪些制度规定了NOSUCHBIZ信息披露", _retr(es), es.pg, biz_terms=["NOSUCHBIZ"]
-    )
+    with scoped_to(retr, es.dvid_a, es.dvid_b):
+        neg = answer_enumerate(
+            "哪些制度规定了NOSUCHBIZ信息披露", retr, es.pg, biz_terms=["NOSUCHBIZ"]
+        )
     assert neg.route_type is RouteType.REFUSE
     assert neg.exhausted_scope  # 可解释拒答

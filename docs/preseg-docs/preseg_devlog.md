@@ -193,8 +193,25 @@
 
 CLAUDE.md 原来只写了"干净栈"是为 **SHA 去重**;这轮暴露出第二种形态:**检索池污染**。尤其
 preseg 件按 CP-010 决策**没有页码**(`page_start` 恒 NULL),任何"引用必带页码"的断言一旦召回到
-preseg 语料就会红。含义:**"栈里有业务语料"与"跑集成套件"互斥**——要么跑套件前清库,要么把这类
-测试的检索按 batch/corpus 收窄。当前选前者。
+preseg 语料就会红。
+
+### 已消除:检索按 dvid 收窄(`conftest.scoped_to`)
+
+不再需要"跑套件前先清库"。查询集成测试改用 `scoped_to` fixture,借 `Retriever.scoped(extra_expr=
+"doc_version_id in [...]")` 把池收窄到测试自己灌的件——**这是边界二本就有的前置过滤机制**,不是为
+测试新加的产品码。只传 `extra_expr` 时 `corpora`/`topk`/`partition_topk`/`include_superseded` 全
+`None` → 回落既有默认,检索行为与不加 scope 等价。
+
+三个文件 7 个测试全部收窄,不止当时红的 3 条:**同文件兄弟测试是侥幸过的**(同样断言"命中必是自己
+的件",只是没被挤掉),只修红的等于留着下次再红。`test_biz_domain_extra_expr_filters_via_milvus`
+的 biz 过滤仍真下推——scope 的 dvid 过滤与 listing 自带 `extra_expr` 由 `_and_expr` 合取(非替换)。
+
+⚠ 用它的前提:scope 内 `scope_active()` 为真,会关掉 `r3_case.attach_cases` 的案例精确反查与
+`r5_judgment` 的引用条款解析(按 PG 身份取数的 widening 桥接)。**断言依赖这两条桥接的测试不能用**。
+
+验收:50 部真语料留在栈里跑模型门控全量 → **1179 passed / 0 failed / 12 skipped**(收窄前同条件
+是 3 failed / 1176 passed)。`scoped_to` 做成 fixture 而非模块级函数:仓根另有 `conftest.py`,
+`from conftest import ...` 在 prepend 导入模式下解析到哪个取决于 sys.path 顺序,歧义且脆。
 
 顺带记一个既有缺口(与本轮无关):`embed_status` 全仓**只有写 `"pending"` 的地方**
 (`s3_structure` / 三个 chunker),没有任何地方写 `"done"`,故 INDEXED 件的该列仍是 `pending`。

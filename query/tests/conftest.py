@@ -63,6 +63,34 @@ EnumStack = namedtuple("EnumStack", "pg mio ctx dvid_a dvid_b biz_code")
 SparseStack = namedtuple("SparseStack", "pg mio ctx dvid docnum_query oral_query")
 
 
+@pytest.fixture
+def scoped_to():
+    """把检索池收窄到本测试自己灌的件(Milvus **前置**过滤)的助手;用法 ``with scoped_to(r, dvid):``。
+
+    做成 fixture 而非模块级函数:仓根另有一个 ``conftest.py``,``from conftest import ...``
+    在 prepend 导入模式下解析到哪个取决于 sys.path 顺序,歧义且脆。
+
+    **为什么需要**:这些集成测试原先隐含假设「Milvus 里只有自己灌的件」。栈里一旦有真业务语料
+    (如 CP-010 预切块的甲方法规),检索池被挤占,依赖池构成的断言就会红——2026-07-29 灌 50 部真
+    语料后实测挂了三条:命中变成别人的件、``pool ≤ topk`` 不再成立、以及 ``page_start is not None``
+    (preseg 件按 CP-010 决策**没有页码**,恒 NULL)。收窄后套件对"栈里有语料"免疫,不必再靠清库。
+
+    **为什么等价**:``Retriever.scoped`` 只传 ``extra_expr`` 时,``corpora``/``topk``/
+    ``partition_topk``/``include_superseded`` 全 ``None`` → 各自回落既有默认,检索行为与不加 scope
+    byte 等价;唯一变化就是多一条 ``doc_version_id in [...]`` 前置过滤。
+
+    ⚠ 副作用:scope 内 ``scope_active()`` 为真,会关掉**按 PG 身份取数的 widening 桥接**
+    (``r3_case.attach_cases`` 的案例精确反查、``r5_judgment`` 的引用条款解析)。断言依赖这两条桥接
+    的测试**不要**用本助手,否则测的是被关掉的路径。
+    """
+
+    def _scope(retriever, *dvids: str):
+        ids = ", ".join(f'"{d}"' for d in dvids)
+        return retriever.scoped(extra_expr=f"doc_version_id in [{ids}]")
+
+    return _scope
+
+
 def _clean_internal_docx(tmp_path):
     """唯一无冲突内规件(首段=manifest 标题、body 无可抽文号 → L1 零冲突 → B 模式自动放行)。"""
     tag = str(ULID())
