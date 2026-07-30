@@ -165,3 +165,37 @@
 验证走旁路:同容器内 `CREATE DATABASE dcetl_verify`,`MOCK_SOURCE_DSN` 指过去跑完再 drop
 (本次即如此,13 分支全绿;`dcetl` 未动)。要让这批真语料也能验详情路径,得单独写一个把主表
 正文搬进详情表的迁移脚本,不能靠重新造数。
+
+### 详情回退链的真语料等价验证(不改 `dcetl` 的做法)
+
+`CREATE DATABASE dcetl_dm_shape TEMPLATE dcetl` 克隆一份 → 把 1,608 行主表正文按
+`code → law_content_code`、`CONTENT_ORDER=0/CONTENT_TYPE=0` 搬进详情表并清空主表 → 两个库各导一次:
+
+- `blocks/*.jsonl` **50 个文件逐字节一致**;
+- `manifest.xlsx` 全表一致,**含 `content_hash`**。
+
+即主表路径与详情回退路径在**真语料**上产出等价。这是 G1 第一次被真数据走过(仿真造数只能验兼容路径)。
+克隆库用完即 drop,`dcetl` 全程只读。
+
+## 2026-07-29 集成套件的"干净栈"假设不止 SHA 去重 —— 还包括"Milvus 里没有别的语料"
+
+按"清空 demo 栈 → 重建 → 灌 50 部真语料 → 跑端到端"走完一轮:48/50 INDEXED(2 件因
+`doc_number` manifest 与 L1 抽取冲突停在 META_REVIEW,人工闸按设计工作),1,710 chunk **100% 带
+`source_code`**,`demo verify reconcile` PG↔Milvus 一致,真检索命中相关条款。
+
+模型门控全量 **1176 passed / 3 failed**,3 条**全部**是语料入库导致,非代码缺陷:
+
+| 失败 | 实际原因 |
+|---|---|
+| `test_r2_change_end_to_end` | 变更查询召回到语料里的《可持续发展报告(试行)》,不是本测试的 fixture 版本对 |
+| `test_enumerate_aggregates_across_documents` | citation 落到 `source_format='preseg'` 的真条款,断言 `page_start is not None` 失败 |
+| `test_rerank_bge_hop_real_text` | 候选池被语料挤掉,`bge_ids != none_ids` |
+
+CLAUDE.md 原来只写了"干净栈"是为 **SHA 去重**;这轮暴露出第二种形态:**检索池污染**。尤其
+preseg 件按 CP-010 决策**没有页码**(`page_start` 恒 NULL),任何"引用必带页码"的断言一旦召回到
+preseg 语料就会红。含义:**"栈里有业务语料"与"跑集成套件"互斥**——要么跑套件前清库,要么把这类
+测试的检索按 batch/corpus 收窄。当前选前者。
+
+顺带记一个既有缺口(与本轮无关):`embed_status` 全仓**只有写 `"pending"` 的地方**
+(`s3_structure` / 三个 chunker),没有任何地方写 `"done"`,故 INDEXED 件的该列仍是 `pending`。
+权威嵌入状态看 `chunk_status`(staging/effective)+ reconcile,那两个是对的。
