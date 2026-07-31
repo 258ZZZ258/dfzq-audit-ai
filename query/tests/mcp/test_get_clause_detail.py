@@ -208,3 +208,21 @@ def test_tool_schema_hides_the_authorization_layer():
 def test_tool_description_says_ids_must_come_from_search():
     # 模型臆造 id 会静默进 rejected;description 不说清,它会以为是检索没覆盖到。
     assert "search_policy" in get_clause_detail.TOOL.description
+
+
+def test_successful_fetch_is_recorded_for_sufficiency_tracking():
+    # T7 的取证完整性判定依赖这条记录。
+    reg = RunRegistry()
+    reg.record("r-1", ["a", "b"])
+    pg = FakePg(anchors={"a": FakeCitation("a")}, texts={"a": "正文"})
+    get_clause_detail.call(AUTH, {"clause_ids": ["a"]}, _deps(pg, reg))
+    assert reg.unfetched("r-1") == ["b"]
+
+
+def test_not_found_ids_are_not_marked_as_fetched():
+    # 「查了但库里没有」不等于「取过正文」—— 标了会让 T7 少报缺口。
+    reg = RunRegistry()
+    reg.record("r-1", ["ghost"])
+    pg = FakePg(anchors={}, texts={})
+    get_clause_detail.call(AUTH, {"clause_ids": ["ghost"]}, _deps(pg, reg))
+    assert reg.unfetched("r-1") == ["ghost"]

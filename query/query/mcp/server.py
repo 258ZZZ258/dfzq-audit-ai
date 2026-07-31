@@ -25,9 +25,23 @@ from mcp.server.stdio import stdio_server
 
 from query.mcp import scope as scope_mod
 from query.mcp.session import RunRegistry
-from query.mcp.tools import get_clause_detail, search_policy
+from query.mcp.tools import (
+    assess_sufficiency,
+    enumerate_clauses,
+    get_clause_detail,
+    search_cases,
+    search_policy,
+)
 
-_TOOL_MODULES = (search_policy, get_clause_detail)
+#: 工具面 = T1/T2/T3/T4/T7。T5(零多版本数据)与 T8(底层无判定能力)本轮不做,
+#: T6 stats_query 待 R2/R3 完成 —— 见 dfzq-pi 规格 §3.2.0。
+_TOOL_MODULES = (
+    search_policy,
+    search_cases,
+    enumerate_clauses,
+    get_clause_detail,
+    assess_sufficiency,
+)
 _BY_NAME = {m.TOOL.name: m for m in _TOOL_MODULES}
 
 _DEPS: dict[str, Any] | None = None

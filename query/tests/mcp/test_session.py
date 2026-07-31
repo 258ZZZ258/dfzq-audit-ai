@@ -60,3 +60,51 @@ def test_recording_an_empty_list_is_harmless():
     reg = RunRegistry()
     reg.record("r-1", [])
     assert reg.allowed("r-1") == set()
+
+
+class TestFetchTracking:
+    """T7 的取证完整性判定需要「检索到的」与「取过正文的」两个集合。"""
+
+    def test_marks_fetched_ids(self):
+        reg = RunRegistry()
+        reg.record("r-1", ["a", "b", "c"])
+        reg.mark_fetched("r-1", ["a"])
+        assert reg.unfetched("r-1") == ["b", "c"]
+
+    def test_unfetched_preserves_retrieval_order(self):
+        # 顺序不是装饰:C3 的 followUp 会照这个顺序提示模型该补哪几条。
+        reg = RunRegistry()
+        reg.record("r-1", ["z", "y", "x"])
+        reg.mark_fetched("r-1", ["y"])
+        assert reg.unfetched("r-1") == ["z", "x"]
+
+    def test_marking_an_unretrieved_id_does_not_widen_the_allowlist(self):
+        # mark_fetched 是观测,不是授权。用它绕过白名单会让 T4 的约束失效。
+        reg = RunRegistry()
+        reg.record("r-1", ["a"])
+        reg.mark_fetched("r-1", ["NEVER-RETRIEVED"])
+        assert reg.allowed("r-1") == {"a"}
+
+    def test_fetch_tracking_is_per_run(self):
+        reg = RunRegistry()
+        reg.record("r-1", ["a"])
+        reg.record("r-2", ["a"])
+        reg.mark_fetched("r-1", ["a"])
+        assert reg.unfetched("r-1") == []
+        assert reg.unfetched("r-2") == ["a"]
+
+    def test_stats_reports_both_counts(self):
+        reg = RunRegistry()
+        reg.record("r-1", ["a", "b", "c"])
+        reg.mark_fetched("r-1", ["a", "b"])
+        assert reg.stats("r-1") == {"retrieved_count": 3, "fetched_count": 2}
+
+    def test_stats_of_unknown_run_is_zeros(self):
+        assert RunRegistry().stats("nope") == {"retrieved_count": 0, "fetched_count": 0}
+
+    def test_forget_clears_fetch_tracking_too(self):
+        reg = RunRegistry()
+        reg.record("r-1", ["a"])
+        reg.mark_fetched("r-1", ["a"])
+        reg.forget("r-1")
+        assert reg.stats("r-1") == {"retrieved_count": 0, "fetched_count": 0}

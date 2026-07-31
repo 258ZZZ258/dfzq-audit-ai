@@ -101,6 +101,10 @@ def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
         item["text"] = texts.get(clause_id)
         items.append(item)
 
+    # 取证记录(观测,非授权):T7 的取证完整性判定要知道哪些检索到的 id 真被取过正文。
+    # 只标真正取到了详情的 —— not_found 的不算「取过」。
+    deps["registry"].mark_fetched(auth.run_id, found)
+
     return {
         "items": items,
         "rejected": rejected,
