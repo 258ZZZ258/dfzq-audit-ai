@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -49,9 +51,30 @@ def _table_block(spec: StatSpec, rows: list) -> AnswerBlock:
     return AnswerBlock(BlockType.TABLE, json.dumps(content, ensure_ascii=False), stream=False)
 
 
-def answer_stats(query: str, pg) -> QueryResult:
-    """统计问句 → ``route_type=statistical`` 契约(TABLE 块)。空结果明示、citations 空。"""
+def answer_stats(
+    query: str,
+    pg,
+    *,
+    perm_tags: Sequence[str] | None = None,
+    corpus_types: Sequence[str] | None = None,
+) -> QueryResult:
+    """统计问句 → ``route_type=statistical`` 契约(TABLE 块)。空结果明示、citations 空。
+
+    **R3**:接收 Java 预计算的授权位并下传 ``build_select``。
+
+    为什么必须显式传参、而不是复用 ``Retriever`` 的 ``scoped()`` contextvar:这条路
+    **根本不经 Retriever**(直查 PG),contextvar 在这里恒为空 —— 那正是 SPEC §9.3 记的
+    现网越界(只授权 internal 的调用方问统计类问题能拿到全量 case 聚合)。
+
+    两个参数都默认 None(= 不约束),既有调用方(会话式 ``/api/query/v1/*``)不传也不会崩;
+    ``perm_tags`` 传空序列同样是「无额外限制」,那是边界契约明文。
+    """
     spec = extract_stat_spec(query)
+    spec = replace(
+        spec,
+        perm_tags=tuple(perm_tags) if perm_tags else None,
+        corpus_types=tuple(corpus_types) if corpus_types else None,
+    )
     with pg.session() as s:
         rows = s.execute(build_select(spec)).all()
     if not rows:
