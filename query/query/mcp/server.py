@@ -22,9 +22,9 @@ from mcp.server.stdio import stdio_server
 
 from query.mcp import scope as scope_mod
 from query.mcp.session import RunRegistry
-from query.mcp.tools import search_policy
+from query.mcp.tools import get_clause_detail, search_policy
 
-_TOOL_MODULES = (search_policy,)
+_TOOL_MODULES = (search_policy, get_clause_detail)
 _BY_NAME = {m.TOOL.name: m for m in _TOOL_MODULES}
 
 _DEPS: dict[str, Any] | None = None
@@ -44,6 +44,7 @@ def _deps() -> dict[str, Any]:
         from pipeline.config import load_config
         from pipeline.index.pg_io import PgIO
         from query.config import load_query_config
+        from query.generate.anchors import fetch_anchors, fetch_parent_text, fetch_texts
         from query.retrieve.hybrid import Retriever
 
         qcfg = load_query_config()
@@ -52,6 +53,11 @@ def _deps() -> dict[str, Any]:
             "pg": PgIO.from_config(load_config()),
             "registry": RunRegistry(),
             "qcfg": qcfg,
+            # 回查函数经 deps 注入而非在工具里直接 import:工具因此可以用假 pg 单测,
+            # 也让「T4 用的到底是 fetch_texts 还是 fetch_parent_text」在测试里可断言。
+            "fetch_anchors": fetch_anchors,
+            "fetch_texts": fetch_texts,
+            "fetch_parent_text": fetch_parent_text,
         }
     return _DEPS
 
