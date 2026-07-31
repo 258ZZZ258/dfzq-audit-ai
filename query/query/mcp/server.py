@@ -13,6 +13,9 @@ dfzq-pi 侧有 ``test/cross-repo-handshake.test.ts`` 钉住这条。
 from __future__ import annotations
 
 import json
+import os
+import sys
+import traceback
 from typing import Any
 
 import anyio
@@ -84,6 +87,36 @@ async def _on_list_tools(ctx, params) -> t.ListToolsResult:  # noqa: ARG001
     return t.ListToolsResult(tools=[m.TOOL for m in _TOOL_MODULES])
 
 
+def _audit(run_id: str, tool: str, outcome: str, **extra: Any) -> None:
+    """每次 tools/call 落一行审计日志。
+
+    **对账凭证**(dfzq-pi 规格 §8.1 的 A6:「pi trajectory 与 MCP 侧日志逐条一致」)。
+
+    落点有两个,都要:
+    - **stderr** —— 人工诊断用。⚠ 消费方 `McpClient` **不转发子进程 stderr**,它只是读走
+      以防管道堵塞、并留一份有界的诊断尾巴(client.ts)。所以 stderr 到不了服务日志,
+      **不能作为对账凭证**(第三次真跑才发现:审计日志写了,serve.log 里一行没有)。
+    - **`POLICY_MCP_AUDIT_LOG` 指定的文件** —— 真正的对账落点。未配置则只写 stderr。
+      机制与消费方既有的 `EVAL_TASK_LOG` 同构。
+
+    ⚠ **只记标识,不记内容**:`clause_id` 是回查键(本来就要回给模型),而条款正文、
+    检索词都不落 —— 日志文件的访问控制比 MCP 通道弱,不该成为绕过授权的读取面。
+    参数只记**键名**,不记值。
+    """
+    record = {"run_id": run_id, "tool": tool, "outcome": outcome, **extra}
+    line = json.dumps(record, ensure_ascii=False)
+    print(line, file=sys.stderr)
+    sys.stderr.flush()
+    path = os.environ.get("POLICY_MCP_AUDIT_LOG")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            # 观测是尽力而为的,写失败不该打断本该完成的工具调用。
+            pass
+
+
 async def _on_call_tool(ctx, params: t.CallToolRequestParams) -> t.CallToolResult:  # noqa: ARG001
     """工具分发。
 
@@ -92,22 +125,54 @@ async def _on_call_tool(ctx, params: t.CallToolRequestParams) -> t.CallToolResul
     (S3 池化后若一进程服务多个并发 run,这会把它们串行化 —— 那时再议。)
     """
     arguments = params.arguments or {}
+    # 授权位缺失时也要能对账,所以 run_id 单独取一次(取不到就记 "-")。
+    run_id = arguments.get("run_id") if isinstance(arguments.get("run_id"), str) else "-"
     module = _BY_NAME.get(params.name)
     if module is None:
+        _audit(run_id or "-", params.name, "unknown_tool")
         return _error(-32602, f"unknown tool: {params.name}")
     try:
         # fail-closed:授权层先判,任何一项缺失都不进业务逻辑。
         auth = scope_mod.parse_auth(arguments)
         result = module.call(auth, arguments, _deps())
     except scope_mod.ScopeError as exc:
+        _audit(run_id or "-", params.name, "rejected", code=exc.code)
         return _error(exc.code, exc.message)
     except Exception as exc:  # noqa: BLE001
-        # 下游(PG / Milvus / embedding)不可用:message 只含组件名与异常类型,
-        # 不回显任何可能含条款正文的内容(同上 §6-1)。
+        # 下游(PG / Milvus / embedding)不可用。
+        #
+        # **回给模型的只有异常类型名**,不含 message —— 异常文本可能夹带被查询的内容,
+        # 而带正文的 isError 响应会触发反幻觉误判(dfzq-pi 规格 §6-1)。
+        #
+        # **但完整堆栈必须写 stderr**:消费方 McpClient 会捕获它并在诊断里回显
+        # (client.ts 的 stderrSummary)。第一次真跑就栽在这上面 —— 当时只回类型名、
+        # stderr 也不写,`ModuleNotFoundError` 这条本身完全无害的信息被藏掉,
+        # 只能靠手工复现最小 env 才诊断出是 fork venv 缺 FlagEmbedding。
+        # 安全边界是「回给模型的内容」,不是「运维能不能看见」,两者不该一起收紧。
+        _audit(run_id or "-", params.name, "upstream_failure", error=type(exc).__name__)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         return _error(-32000, f"upstream failure in {params.name}: {type(exc).__name__}")
+
+    _audit(
+        run_id or "-",
+        params.name,
+        "ok",
+        param_keys=sorted(k for k in arguments if k not in ("perm_tags", "corpus_types", "run_id")),
+        clause_ids=_clause_ids_of(result),
+    )
     return t.CallToolResult(
         content=[t.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
     )
+
+
+def _clause_ids_of(result: dict) -> list[str]:
+    """从工具返回里抽 clause_id,供 A6 对账。形状随工具而异,抽不到就空。"""
+    for key in ("hits", "items", "cases"):
+        rows = result.get(key)
+        if isinstance(rows, list):
+            return [r["clause_id"] for r in rows if isinstance(r, dict) and "clause_id" in r]
+    return []
 
 
 def build_server() -> Server:
