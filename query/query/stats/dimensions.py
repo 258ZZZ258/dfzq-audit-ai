@@ -54,6 +54,12 @@ class StatSpec:
     year_from: int | None = None       # 过滤:年 >=
     year_eq: int | None = None         # 过滤:年 ==
     org_like: str | None = None        # 过滤:机构含(MVP 不从 NL 抽,留 sql_builder 支持)
+    # ── R2:权限约束(Java 预计算,**绝不从用户问句抽**)────────────────────────────
+    #: 空/None = 无额外限制(边界契约明文,非 fail-open;routes_boundary.py:39-40)
+    perm_tags: tuple[str, ...] | None = None
+    #: 边界语义的语料类型(internal/external/qa/case);None = 不约束。
+    #: ⚠ 转成 Document.corpus_type 的 P-INT/P-EXT 由 sql_builder 做,别在这里转。
+    corpus_types: tuple[str, ...] | None = None
 
 
 def _detect_group_by(q: str) -> GroupBy:
