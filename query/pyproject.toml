@@ -19,6 +19,12 @@ dependencies = [
     "fastapi>=0.115",   # HTTP API(SPEC-API):原生 SSE/multipart/校验(query.api)
     "uvicorn>=0.30",    # ASGI 服务器(query-api 启动)
     "python-multipart>=0.0.9",  # FastAPI 文件上传(multipart/form-data;/uploads)
+    # policy-query-mcp(C1)的 stdio server。pin 大版本:2.0 的 server API 与 1.x 不同,
+    # 且协议版本集合是跨仓耦合点 —— 消费方 dfzq-pi 的 MCP client 硬编码 protocolVersion
+    # "2024-11-05"(packages/task-runtime/src/toolsets/mcp/client.ts:127),而它正是本 SDK
+    # HANDSHAKE_PROTOCOL_VERSIONS 里**最老**的一个(= OLDEST_SUPPORTED_VERSION)。
+    # 下一个大版本若把它移出握手集合,启动即失败 —— 靠真 spawn 的跨仓握手测试兜(规格 §6-3)。
+    "mcp>=2.0,<3",
 ]
 
 # §9.3 Langfuse 观测(可选):默认 NoopTracer 零网络、不需 langfuse;observe 开 + creds 时按需装。
