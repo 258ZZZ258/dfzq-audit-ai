@@ -57,7 +57,9 @@ def test_configured_audit_log_env_passes(monkeypatch, tmp_path):
 # 在 anyio.run(_main) 之前就抛,从不会碰到 PG / Milvus 或 pipeline config —— 已用
 # `env -i PATH HOME`(比 monkeypatch 更严格的最小环境)手工验证过,子进程在完全没有
 # PIPELINE_CONFIG_DIR 的情况下同样精确落在这条 RuntimeError 上,不会先在别处报错。
-def _spawn_server_missing_env(monkeypatch: pytest.MonkeyPatch, audit_log_value: str | None) -> subprocess.CompletedProcess[str]:
+def _spawn_server_missing_env(
+    monkeypatch: pytest.MonkeyPatch, audit_log_value: str | None
+) -> subprocess.CompletedProcess[str]:
     monkeypatch.delenv("POLICY_MCP_AUDIT_LOG", raising=False)
     if audit_log_value is not None:
         monkeypatch.setenv("POLICY_MCP_AUDIT_LOG", audit_log_value)
