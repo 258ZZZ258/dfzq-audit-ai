@@ -189,6 +189,22 @@ def _clause_ids_of(result: dict) -> list[str]:
     return []
 
 
+def require_audit_log_path() -> str:
+    """A6 的对账落点必须配好才允许起服务。
+
+    未配置时 ``_audit`` 只写 stderr,而消费方 ``McpClient`` **不转发子进程 stderr** ——
+    它只读走以防管道堵塞、并留一份有界的诊断尾巴。所以「未配置」的真实后果不是
+    「日志少一份」,而是 **A6 完全无从对账**,且失败是静默的。
+    """
+    path = os.environ.get("POLICY_MCP_AUDIT_LOG")
+    if not path:
+        raise RuntimeError(
+            "POLICY_MCP_AUDIT_LOG is required: without it the audit trail only reaches stderr, "
+            "which McpClient does not forward, and A6 reconciliation becomes impossible."
+        )
+    return path
+
+
 def build_server() -> Server:
     return Server(
         "policy-query",
@@ -206,6 +222,7 @@ async def _main() -> None:
 
 
 def main() -> None:
+    require_audit_log_path()
     anyio.run(_main)
 
 
