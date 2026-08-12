@@ -69,6 +69,8 @@ class QueryConfig(BaseModel):
     # ⚠ §9.1 N3 分解模型(CP-007 轻量调用);None → 复用主答 llm_model;env QUERY_DECOMPOSE_MODEL 覆盖。
     decompose_model: str | None = None
     decompose_max_sub: int = 4  # ⚠ V0 fan-out 子查询上限(封顶复合检索成本;§3.3)
+    # 制度比对:一份上传外规内的多条款检索并发上限。嵌入仍批量串行，只有 Milvus 查询并行。
+    batch_retrieve_concurrency: int = 4  # QUERY_BATCH_RETRIEVE_CONCURRENCY 覆盖
     # §9.3 Langfuse 全链路观测:**默认关**(观测外发外部服务、守零网络;区别于 N0/N1/N3 默认开)。
     # 开 + LANGFUSE_* creds(env)→ LangfuseTracer;否则 NoopTracer(零网络)。env QUERY_OBSERVE 覆盖。
     observe: bool = False
@@ -127,6 +129,8 @@ def _apply_env(raw: dict) -> None:
         raw["decompose"] = env["QUERY_DECOMPOSE"]  # "0"/"1" → pydantic bool 强转
     if "QUERY_DECOMPOSE_MODEL" in env:
         raw["decompose_model"] = env["QUERY_DECOMPOSE_MODEL"]
+    if "QUERY_BATCH_RETRIEVE_CONCURRENCY" in env:
+        raw["batch_retrieve_concurrency"] = env["QUERY_BATCH_RETRIEVE_CONCURRENCY"]
     if "QUERY_OBSERVE" in env:
         raw["observe"] = env["QUERY_OBSERVE"]  # "0"/"1" → pydantic bool 强转
     if "QUERY_DOCNUM_BOOST" in env:
