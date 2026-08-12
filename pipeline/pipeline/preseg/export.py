@@ -159,12 +159,13 @@ def _live(rows: list[dict]) -> list[dict]:
 # ── 纯转换(FakeSource 可单测)────────────────────────────────────────────────
 
 
-def _detail_text_by_content_code(content_details: list[dict]) -> dict[str, str]:
-    """按条款 CODE 稳定合并有效的 ``LAW_CONTENT_DETAIL`` 文本段。
+def _text_details_by_content_code(content_details: list[dict]) -> dict[str, list[str]]:
+    """按 ``LAW_CONTENT.CODE`` 返回稳定排序的独立正文详情块。
 
-    真实达梦库中 ``LAW_CONTENT.CONTENT`` 几乎全部为空，正文在详情表；详情的
-    ``CONTENT_TYPE=0`` 是文本，图片/视频不进入当前纯文本检索契约。相同条款、相同顺序的
-    重复物理行且内容相同可去重；内容冲突则拒收，不能静默拼出非权威正文。
+    内网内规的 ``LAW_CONTENT_DETAIL.CONTENT`` 一行即一个业务正文段，不能为了适配
+    条款型法规而在导出时拼接为大段：那会丢失段落边界，令检索、版本差异和后续人工映射
+    都失去稳定锚点。详情仅在父 ``LAW_CONTENT.CONTENT`` 为空时使用；图片/视频仍跳过。
+    同条款同顺序的重复物理行内容相同可去重，冲突则拒收该制度，避免静默重排权威正文。
     """
     grouped: dict[str, list[tuple[int, str, str]]] = {}
     for detail in _live(content_details):
@@ -176,7 +177,7 @@ def _detail_text_by_content_code(content_details: list[dict]) -> dict[str, str]:
             _int(detail.get("CONTENT_ORDER")), str(detail.get("ID") or ""), text,
         ))
 
-    out: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
     for code, segments in grouped.items():
         ordered = sorted(segments, key=lambda segment: (segment[0], segment[1]))
         by_order: dict[int, str] = {}
@@ -191,7 +192,7 @@ def _detail_text_by_content_code(content_details: list[dict]) -> dict[str, str]:
                 continue
             by_order[order] = text
             texts.append(text)
-        out[code] = "\n".join(texts)
+        out[code] = texts
     return out
 
 
@@ -203,15 +204,13 @@ def blocks_from_contents(
     - block_seq = 稳定运行序(enumerate 保唯一);排序按 **INDEX_NO(源 0-based 全局序)** + CODE,
       不按 PATH_CODE 字符串(未补零会让 1.10 排在 1.2 前);
     - is_catalog = IS_CATALOG==1;source_code = CODE(精确桥接锚,超 256 → 弃锚+告警不崩);
-    - 正文优先取 LAW_CONTENT.CONTENT；为空时按同 CODE 回退拼接详情表的文本段；
+    - 正文优先取 LAW_CONTENT.CONTENT；为空时按同 CODE 回退为多个详情文本块（每行一个块）；
       图片/视频详情跳过，空正文目录节点用 TITLE 兜底成块。
     """
-    detail_text_by_code = _detail_text_by_content_code(content_details or [])
+    text_details_by_code = _text_details_by_content_code(content_details or [])
     hydrated: list[dict] = []
     for content in _live(contents):
         row = dict(content)
-        if not _s(row.get("CONTENT")):
-            row["CONTENT"] = detail_text_by_code.get(_s(row.get("CODE")) or "")
         hydrated.append(row)
 
     # 去重:真数据(探查 G1/G2)每节点有 2 物理行(**同 CODE 异 snowflake ID,内容一致**,
@@ -233,26 +232,33 @@ def blocks_from_contents(
         by_code[code] = c
         deduped.append(c)
     ordered = sorted(deduped, key=lambda r: (_int(r.get("INDEX_NO")), str(r.get("CODE") or "")))
-    out: list[dict] = []
-    for seq, c in enumerate(ordered):
+    pending: list[dict] = []
+    for c in ordered:
         title = _s(c.get("TITLE"))
         is_catalog = _int(c.get("IS_CATALOG")) == 1
-        text = _s(c.get("CONTENT")) or (title if is_catalog else None)
-        if not text:  # 正文块无内容 → 跳过(reader 要求 text 非空)
-            continue
-        rec: dict = {"block_seq": seq, "text": text, "is_catalog": is_catalog}
-        if title:
-            rec["clause_label"] = title
         sc = _s(c.get("CODE"))
         if sc and len(sc) > _COL_WIDTHS["source_code"]:  # 锚超列宽 → 弃锚(回落 fuzzy),不崩
             warnings.append(f"LAW_CONTENT.CODE 超 {_COL_WIDTHS['source_code']} 弃锚:{sc[:40]}…")
             sc = None
-        if sc:
-            rec["source_code"] = sc
-        if norm := path_code_to_norm(c.get("PATH_CODE"), title):
-            rec["clause_path_norm"] = norm
-        out.append(rec)
-    return out
+        texts = [_s(c.get("CONTENT"))] if _s(c.get("CONTENT")) else text_details_by_code.get(
+            _s(c.get("CODE")) or "", []
+        )
+        if not texts and is_catalog and title:
+            texts = [title]
+        for text in texts:
+            if not text:  # reader 要求 text 非空
+                continue
+            rec: dict = {"text": text, "is_catalog": is_catalog}
+            if title:
+                rec["clause_label"] = title
+            if sc:
+                rec["source_code"] = sc
+            if norm := path_code_to_norm(c.get("PATH_CODE"), title):
+                rec["clause_path_norm"] = norm
+            pending.append(rec)
+
+    # 一个 LAW_CONTENT 节点可展开为多条详情，故必须在展开后分配连续且稳定的块序号。
+    return [{"block_seq": seq, **rec} for seq, rec in enumerate(pending)]
 
 
 #: CASE_PARTY 列 → persons dict 键(消费面需 name/type/identity/reason;富字段照带,D6)

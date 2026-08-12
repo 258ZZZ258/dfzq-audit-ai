@@ -14,6 +14,7 @@ from query.api import (
     routes_boundary,
     routes_clauses,
     routes_conversations,
+    routes_documents,
     routes_export,
     routes_messages,
     routes_misc,
@@ -23,10 +24,12 @@ from query.api.errors import install_error_handlers
 _API_PREFIX = "/api/query/v1"
 
 
-def create_app(service=None) -> FastAPI:
+def create_app(service=None, document_processor=None, document_library=None) -> FastAPI:
     """建 app。``service`` 注入(测试)存 ``app.state.service``;None → 首请求惰性建。"""
     app = FastAPI(title="制度查询智能体 API", version="0.1.0")
     app.state.service = service
+    app.state.document_processor = document_processor
+    app.state.document_library = document_library
     install_error_handlers(app)
 
     @app.get("/healthz")
@@ -41,6 +44,7 @@ def create_app(service=None) -> FastAPI:
     app.include_router(routes_export.router, prefix=_API_PREFIX)
     # 边界二(audit-biz → audit-ai):无状态 /v1/query,独立于前端向 /api/query/v1/*(无前缀)
     app.include_router(routes_boundary.router)
+    app.include_router(routes_documents.router)
     return app
 
 

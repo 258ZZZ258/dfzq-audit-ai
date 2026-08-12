@@ -26,6 +26,56 @@ def test_empty_sides():
     assert diff_clauses([], []) == []
 
 
+def test_same_unique_text_at_a_new_path_is_reported_as_moved_not_added_and_removed():
+    changes = diff_clauses(
+        [_c("第二章/第一条", "正文未改")],
+        [_c("第三章/第一条", "正文未改")],
+    )
+
+    assert changes == [
+        ClauseChange(
+            clause_path_norm="第三章/第一条",
+            kind="moved",
+            old_text="正文未改",
+            new_text="正文未改",
+            old_clause_path_norm="第二章/第一条",
+            new_clause_path_norm="第三章/第一条",
+        )
+    ]
+
+
+def test_permuted_existing_paths_are_reported_as_moved_before_same_path_changes():
+    """第 4/5/6 条互换位置时，路径仍重叠，不能被同路径比较抢先误判为修改。"""
+    changes = diff_clauses(
+        [
+            _c("第四条", "甲条正文"),
+            _c("第五条", "乙条正文"),
+            _c("第六条", "丙条正文"),
+        ],
+        [
+            _c("第四条", "乙条正文"),
+            _c("第五条", "丙条正文"),
+            _c("第六条", "甲条正文"),
+        ],
+    )
+
+    assert {(change.old_clause_path_norm, change.new_clause_path_norm) for change in changes} == {
+        ("第五条", "第四条"),
+        ("第六条", "第五条"),
+        ("第四条", "第六条"),
+    }
+    assert {change.kind for change in changes} == {"moved"}
+
+
+def test_repeated_identical_text_is_left_as_added_and_removed_to_avoid_unsafe_move_matching():
+    changes = diff_clauses(
+        [_c("第一条", "重复正文"), _c("第二条", "重复正文")],
+        [_c("第三条", "重复正文"), _c("第四条", "重复正文")],
+    )
+
+    assert {change.kind for change in changes} == {"added", "removed"}
+
+
 def test_aggregates_subchunks_by_path():
     # R2-CLAUSE-DIFF-COMPLETE:同 path 多子块(切块器拆超长条款)→ 聚合比较,后续子块差异不漏
     old = [_c("第一条", "A", 0), _c("第一条", "B旧", 1)]

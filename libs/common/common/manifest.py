@@ -10,3 +10,7 @@ REQUIRED_COLUMNS = [
     "filename", "title", "doc_number", "issuer", "perm_tag",
     "corpus_type", "sub_type", "biz_domain", "issue_date", "effective_date", "supersedes",
 ]
+
+# 版本业务字段来自内网制度主数据；它们是可选扩展，老批次继续可导入。
+# 注意：这不是把技术 doc_version_id 暴露给上游，而是由源系统提供的业务版号/名称/修订序号。
+OPTIONAL_VERSION_COLUMNS = ["version_code", "version_display_name", "revision_no"]

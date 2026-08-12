@@ -29,6 +29,8 @@ from query.mcp.tools import (
     assess_sufficiency,
     enumerate_clauses,
     get_clause_detail,
+    list_internal_obligations,
+    resolve_source_law,
     search_cases,
     search_policy,
 )
@@ -41,6 +43,8 @@ _TOOL_MODULES = (
     enumerate_clauses,
     get_clause_detail,
     assess_sufficiency,
+    list_internal_obligations,
+    resolve_source_law,
 )
 _BY_NAME = {m.TOOL.name: m for m in _TOOL_MODULES}
 
@@ -185,7 +189,11 @@ def _clause_ids_of(result: dict) -> list[str]:
     for key in ("hits", "items", "cases"):
         rows = result.get(key)
         if isinstance(rows, list):
-            return [r["clause_id"] for r in rows if isinstance(r, dict) and "clause_id" in r]
+            return [
+                r.get("clause_id", r.get("chunk_id"))
+                for r in rows
+                if isinstance(r, dict) and isinstance(r.get("clause_id", r.get("chunk_id")), str)
+            ]
     return []
 
 

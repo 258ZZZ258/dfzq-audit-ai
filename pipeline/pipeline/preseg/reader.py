@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from common.manifest import REQUIRED_COLUMNS
+from common.manifest import OPTIONAL_VERSION_COLUMNS, REQUIRED_COLUMNS
 
 #: 扩展列(SPEC §3.2):幂等键两分量 + 源元数据。列集精确匹配,缺/多整批拒收(承 s0 语义)。
 #: CP-010 内网对齐补 source_law_id(LAW_BASIC.SOURCE_LAW_ID,版本链源)+ invalid_date
@@ -81,7 +81,7 @@ def validate_manifest_header(header: list) -> None:
     """列集**精确匹配**(与 s0 制度类 manifest 同语义):缺列/多列整批拒收。"""
     got = [str(h) for h in header if h is not None]
     missing = [c for c in PRESEG_REQUIRED_COLUMNS if c not in got]
-    extra = [c for c in got if c not in PRESEG_REQUIRED_COLUMNS]
+    extra = [c for c in got if c not in [*PRESEG_REQUIRED_COLUMNS, *OPTIONAL_VERSION_COLUMNS]]
     if missing or extra:
         raise PresegFormatError(
             f"P-PRESEG manifest 列集不匹配:缺失 {missing or '无'};多余 {extra or '无'}"

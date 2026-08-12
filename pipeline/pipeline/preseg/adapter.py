@@ -5,8 +5,9 @@
 超预算二次切分(复用 chunker._split_oversize 纯文本链)、文档级适用对象继承(D7)。
 
 - 章/节标题块:更新上下文,**不成块**(与条款树"章节点不出 chunk"一致);
-- 推导失败块:伪路径 ``preseg/{block_seq}`` + ``chunk_type="preseg_raw"``(仿 qa/case 先例),
-  可检索、不参与引用末段对齐,批次占比是推导器健康信号(告警阈值 ⚠ 待样例标定);
+- 推导失败块:伪路径 ``preseg/{block_seq}``;有 ``source_code`` 的达梦详情正文仍标为
+  ``clause``（可参与内规核查），无源锚的自由备注才为 ``preseg_raw``，后者可检索但不参与
+  引用末段对齐；批次占比是推导器健康信号(告警阈值 ⚠ 待样例标定);
 - 零页码(D2):page_start/page_end 恒 None,引用三级;
 - chunk_id 走既有 ``compute_chunk_id(dvid, norm, seq)``,幂等契约不变(B1)。
 """
@@ -61,7 +62,10 @@ def build_preseg_specs(
             chunk_type = "table" if b.is_table else "clause"
         else:  # 推导失败 → 伪路径,不阻塞入库(降级留痕)
             norm = f"preseg/{b.block_seq}"
-            chunk_type = "table" if b.is_table else "preseg_raw"
+            # 真实内网内规中，LAW_CONTENT_DETAIL 的一行就是一个可核查正文段，
+            # 但常没有“第X条”标签。存在源节点锚时仍作为 clause 入库；只有既无
+            # 结构标签、也无源锚的自由备注才保持 preseg_raw，避免混入覆盖核查。
+            chunk_type = "table" if b.is_table else ("clause" if b.source_code else "preseg_raw")
 
         label = raw
         breadcrumb = " > ".join(p for p in (chapter_raw, section_raw, label) if p)

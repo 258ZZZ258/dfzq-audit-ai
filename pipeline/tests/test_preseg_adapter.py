@@ -70,6 +70,20 @@ class TestAdapterPure:
         assert [s.clause_path_norm for s in specs] == ["preseg/4", "preseg/7"]
         assert all(s.chunk_type == "preseg_raw" for s in specs)
 
+    def test_source_anchored_detail_without_article_label_is_a_clause(self):
+        """DM 详情正文一行一块，即便无“第X条”标题也须参与内规覆盖核查。"""
+        block = PresegBlock(
+            block_seq=12,
+            text="各单位应当加强员工投资行为管理，落实事前申报和事后登记要求。",
+            source_code="LAW-CONTENT-9",
+        )
+
+        spec = build_preseg_specs("dv1", [block], CFG)[0]
+
+        assert spec.clause_path_norm == "preseg/12"
+        assert spec.chunk_type == "clause"
+        assert spec.source_code == "LAW-CONTENT-9"
+
     def test_oversize_split_marks_hard_cut(self):
         long_no_boundary = "甲" * (CFG.target_token_max * 2 + 10)  # 无句末边界 → 字符硬切
         specs = build_preseg_specs("dv1", [_b(0, "第九条", long_no_boundary)], CFG)

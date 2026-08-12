@@ -93,6 +93,11 @@ class DocVersion(AuditMixin, Base):
     doc_number: Mapped[str | None] = mapped_column(String(128))  # 发文字号
     issue_date: Mapped[date | None] = mapped_column(Date)
     effective_date: Mapped[date | None] = mapped_column(Date)  # 生效日期(upcoming 判定 + 时间窗)
+    # 内网源系统的正式版本元数据。logical_id 是制度身份，doc_version_id 是一次导入的技术主键；
+    # 下面三列才是面向用户和审计的版本语义，不能再由日期临时拼接。
+    version_code: Mapped[str | None] = mapped_column(String(64))
+    version_display_name: Mapped[str | None] = mapped_column(String(128))
+    revision_no: Mapped[int | None] = mapped_column(Integer)
     # 失效日期(源 INVALID_DATE,CP-010 内网对齐,迁移 0015):与 effective_date 成对,abolished 判定
     invalid_date: Mapped[date | None] = mapped_column(Date)
     title: Mapped[str | None] = mapped_column(String(512))

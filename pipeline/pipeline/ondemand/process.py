@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 from common.ir import IRDocument, SourceFormat
 from pipeline.chunking.profile_router import build_specs
 from pipeline.config import ChunkConfig, Settings
+from pipeline.index.object_store import ObjectTooLargeError
 from pipeline.ondemand.artifact import (
     ArtifactChunk,
     ArtifactDoc,
@@ -32,6 +33,10 @@ class UnsupportedUploadType(ValueError):
 
 class UploadParseFailed(RuntimeError):
     """解析失败(端点映射 500,带 reason)。"""
+
+
+class UploadTooLarge(ValueError):
+    """上传对象超过按需处理允许的最大字节数(端点映射 413)。"""
 
 
 # 扩展名 → (source_format, content_type);Excel 暂无解析器(post-MVP,§8)
@@ -120,6 +125,7 @@ def process_upload(
     upload_id: str,
     filename: str,
     corpus_hint: str | None = None,
+    max_bytes: int = 50 * 1024 * 1024,
 ) -> UploadArtifact:
     """轻链编排:从 ObjectStore 拉 raw → 解析 → 结构化 → 写 artifact → 返回产物。
 
@@ -127,7 +133,10 @@ def process_upload(
     ObjectStore 或 MinIO 后端均可。幂等:同 ``upload_id`` 重跑覆盖同 artifact。
     """
     source_format, content_type = detect_format(filename)
-    data = object_store.get(object_key)
+    try:
+        data = object_store.get(object_key, max_bytes=max_bytes)
+    except ObjectTooLargeError as exc:
+        raise UploadTooLarge(f"上传文件超过 {max_bytes} 字节") from exc
     result = make_parser().parse(
         data, source_format, scanned_char_per_page_max=settings.parse.scanned_char_per_page_max
     )

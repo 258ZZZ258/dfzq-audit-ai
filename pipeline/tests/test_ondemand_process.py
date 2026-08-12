@@ -18,6 +18,7 @@ from pipeline.ondemand.artifact import ArtifactSource, UploadArtifact
 from pipeline.ondemand.process import (
     UnsupportedUploadType,
     UploadParseFailed,
+    UploadTooLarge,
     build_artifact,
     detect_format,
     handle_for,
@@ -127,3 +128,29 @@ def test_process_upload_parse_failed(tmp_path, monkeypatch):
         process_upload(
             store, load_config(), object_key="upload/u1/x.pdf", upload_id="u1", filename="x.pdf"
         )
+
+
+def test_process_upload_rejects_object_over_limit_before_parse(tmp_path, monkeypatch):
+    store = ObjectStore(tmp_path)
+    raw = tmp_path / "upload" / "u1" / "x.pdf"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"12345")
+    parser_called = False
+
+    def _parser():
+        nonlocal parser_called
+        parser_called = True
+        return _fake_parser(_ok_result())
+
+    monkeypatch.setattr(proc, "make_parser", _parser)
+
+    with pytest.raises(UploadTooLarge):
+        process_upload(
+            store,
+            load_config(),
+            object_key="upload/u1/x.pdf",
+            upload_id="u1",
+            filename="x.pdf",
+            max_bytes=4,
+        )
+    assert parser_called is False

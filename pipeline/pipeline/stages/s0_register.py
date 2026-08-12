@@ -18,10 +18,10 @@ from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from ulid import ULID
 
-from common.manifest import REQUIRED_COLUMNS
+from common.manifest import OPTIONAL_VERSION_COLUMNS, REQUIRED_COLUMNS
 from common.pg_models import (
     Document,
     DocVersion,
@@ -97,6 +97,32 @@ def _parse_issue_date(value: object) -> date | None:
         return date.fromisoformat(str(value).strip())
     except ValueError:
         return None
+
+
+def _version_metadata_for_registration(
+    ctx: StageContext, row: dict, logical_id: str | None, supersedes_version_id: str | None
+) -> tuple[str | None, str | None, int]:
+    """保留源系统正式版号；缺失时只补稳定的内部修订序号。"""
+    version_code = str(row.get("version_code") or "").strip() or None
+    version_display_name = str(row.get("version_display_name") or "").strip() or None
+    try:
+        supplied_revision = int(row.get("revision_no")) if str(row.get("revision_no") or "").strip() else None
+    except (TypeError, ValueError):
+        supplied_revision = None
+    if supplied_revision is not None and supplied_revision > 0:
+        return version_code, version_display_name, supplied_revision
+    with ctx.db.session() as session:
+        if supersedes_version_id:
+            previous = session.get(DocVersion, supersedes_version_id)
+            if previous and previous.revision_no:
+                return version_code, version_display_name, previous.revision_no + 1
+        if logical_id:
+            latest = session.scalar(
+                select(func.max(DocVersion.revision_no)).where(DocVersion.logical_id == logical_id)
+            )
+            if latest:
+                return version_code, version_display_name, int(latest) + 1
+    return version_code, version_display_name, 1
 
 
 def _read_manifest(path: Path) -> tuple[list, list[dict]]:
@@ -191,7 +217,7 @@ def register_batch(
     # SPEC §S0:9 列契约要求列集合精确匹配——缺列/多列均整批拒收(空表头单元格不计为列)。
     header_cols = [c for c in (header or []) if c not in (None, "")]
     missing = [c for c in REQUIRED_COLUMNS if c not in header_cols]
-    extra = [c for c in header_cols if c not in REQUIRED_COLUMNS]
+    extra = [c for c in header_cols if c not in [*REQUIRED_COLUMNS, *OPTIONAL_VERSION_COLUMNS]]
     if missing or extra:
         parts = ([f"缺必填列: {missing}"] if missing else []) + (
             [f"多余列: {extra}"] if extra else []
@@ -366,6 +392,10 @@ def _register_one_preseg(
             )
             report.warnings.append(f"{fn}: source_doc_id={sid} 内容哈希变化,自动 revise_replace")
 
+    version_code, version_display_name, revision_no = _version_metadata_for_registration(
+        ctx, row, logical_id, supersedes_vid
+    )
+
     # 元数据完整率:批次报告 warning,不作门(D10 哨兵化——源的元数据缺漏拦了=制造覆盖缺口)
     missing_meta = [
         k for k in ("issuer", "effective_date", "issuer_level_src")
@@ -410,6 +440,9 @@ def _register_one_preseg(
                 doc_number=str(row.get("doc_number") or "") or None,
                 issue_date=_parse_issue_date(row.get("issue_date")),
                 effective_date=_parse_issue_date(row.get("effective_date")),
+                version_code=version_code,
+                version_display_name=version_display_name,
+                revision_no=revision_no,
                 invalid_date=_parse_issue_date(row.get("invalid_date")),  # 失效日期(provenance)
                 sub_type=str(row.get("sub_type") or "") or None,
                 title=title or None,
@@ -524,6 +557,9 @@ def _register_one(
     if unsupported:
         report.warnings.append(f"{fn}: 版本关系 {rel.value} demo 不支持,转人工(meta_confirm 队列)")
     dvid = str(ULID())
+    version_code, version_display_name, revision_no = _version_metadata_for_registration(
+        ctx, row, logical_id, supersedes_vid
+    )
     ext = fmt if fmt in WHITELIST_FORMATS else (Path(fn).suffix.lstrip(".") or "bin")
     raw_key = ctx.object_store.put_raw(corpus, batch_id, dvid, ext, data)  # 写一次
     status = PipelineState.QUARANTINED if reason else PipelineState.REGISTERED
@@ -549,6 +585,9 @@ def _register_one(
                 doc_number=doc_number or None,
                 issue_date=issue_date,
                 effective_date=_parse_issue_date(row.get("effective_date")),
+                version_code=version_code,
+                version_display_name=version_display_name,
+                revision_no=revision_no,
                 sub_type=str(row.get("sub_type") or "") or None,
                 title=title or None,
                 version_relation=relation,

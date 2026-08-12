@@ -218,8 +218,8 @@ def test_deleted_and_empty_laws_filtered(tmp_path):
     assert not list((tmp_path / "blocks").glob("L-EMPTY-*.jsonl"))
 
 
-def test_blocks_fall_back_to_live_text_details_when_main_content_is_empty():
-    """真实达梦中 LAW_CONTENT.CONTENT 基本为空，正文在 CONTENT_DETAIL 分段存放。"""
+def test_blocks_keep_each_live_text_detail_as_an_independent_block_when_main_content_is_empty():
+    """真实内规的详情行就是独立正文块，不能在导出时拼成一个大段。"""
     contents = [{
         "CODE": "LC-1", "IS_CATALOG": 0, "TITLE": "第一条", "INDEX_NO": 1,
         "CONTENT": "", "DEL_FLAG": "A",
@@ -237,9 +237,10 @@ def test_blocks_fall_back_to_live_text_details_when_main_content_is_empty():
 
     blocks = export.blocks_from_contents(contents, [], content_details=details)
 
-    assert len(blocks) == 1
-    assert blocks[0]["source_code"] == "LC-1"
-    assert blocks[0]["text"] == "前半段\n后半段。"
+    assert [block["block_seq"] for block in blocks] == [0, 1]
+    assert [block["text"] for block in blocks] == ["前半段", "后半段。"]
+    # 回查仍以父 LAW_CONTENT.CODE 为锚；详情行本身不表示外规引用关系。
+    assert [block["source_code"] for block in blocks] == ["LC-1", "LC-1"]
 
 
 def test_blocks_keep_nonempty_main_content_over_details():
@@ -256,6 +257,29 @@ def test_blocks_keep_nonempty_main_content_over_details():
     blocks = export.blocks_from_contents(contents, [], content_details=details)
 
     assert blocks[0]["text"] == "主表正文。"
+
+
+def test_detail_blocks_keep_global_source_order_across_content_nodes():
+    """详情段按父节点 INDEX_NO，再按详情 CONTENT_ORDER 排列，不能按详情表物理顺序。"""
+    contents = [
+        {"CODE": "LC-2", "IS_CATALOG": 0, "TITLE": "第二部分", "INDEX_NO": 2,
+         "CONTENT": "", "DEL_FLAG": "A"},
+        {"CODE": "LC-1", "IS_CATALOG": 0, "TITLE": "第一部分", "INDEX_NO": 1,
+         "CONTENT": "", "DEL_FLAG": "A"},
+    ]
+    details = [
+        {"LAW_CONTENT_CODE": "LC-2", "CONTENT_ORDER": 1, "CONTENT_TYPE": 0,
+         "CONTENT": "第二部分正文", "DEL_FLAG": "A"},
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 2, "CONTENT_TYPE": 0,
+         "CONTENT": "第一部分后段", "DEL_FLAG": "A"},
+        {"LAW_CONTENT_CODE": "LC-1", "CONTENT_ORDER": 1, "CONTENT_TYPE": 0,
+         "CONTENT": "第一部分前段", "DEL_FLAG": "A"},
+    ]
+
+    blocks = export.blocks_from_contents(contents, [], content_details=details)
+
+    assert [block["text"] for block in blocks] == ["第一部分前段", "第一部分后段", "第二部分正文"]
+    assert [block["source_code"] for block in blocks] == ["LC-1", "LC-1", "LC-2"]
 
 
 def test_build_batch_reads_details_for_empty_main_content(tmp_path):

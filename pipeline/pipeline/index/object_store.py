@@ -22,6 +22,10 @@ from common.ir import IRDocument
 from pipeline.config import ObjectStoreConfig, Settings
 
 
+class ObjectTooLargeError(ValueError):
+    """Object exceeds the caller's bounded-read limit."""
+
+
 class ObjectStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -64,8 +68,15 @@ class ObjectStore:
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
 
-    def get(self, key: str) -> bytes:
-        return self._path(key).read_bytes()
+    def get(self, key: str, *, max_bytes: int | None = None) -> bytes:
+        path = self._path(key)
+        if max_bytes is None:
+            return path.read_bytes()
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ObjectTooLargeError(f"object exceeds {max_bytes} bytes")
+        return data
 
     def _write(self, key: str, data: bytes, *, write_once: bool) -> str:
         p = self._path(key)
@@ -155,10 +166,13 @@ class MinioObjectStore(ObjectStore):
                 return False
             raise
 
-    def get(self, key: str) -> bytes:
+    def get(self, key: str, *, max_bytes: int | None = None) -> bytes:
         resp = self._client.get_object(self._bucket, key)
         try:
-            return resp.read()
+            data = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+            if max_bytes is not None and len(data) > max_bytes:
+                raise ObjectTooLargeError(f"object exceeds {max_bytes} bytes")
+            return data
         finally:
             resp.close()
             resp.release_conn()
