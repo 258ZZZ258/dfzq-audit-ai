@@ -405,6 +405,53 @@ class QueryMessage(AuditMixin, Base):
     ai_label: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
+# ── Pi task-runtime 任务历史（跨进程持久化）────────────────────────────────────
+class TaskRun(AuditMixin, Base):
+    """Pi task-runtime 的任务快照。
+
+    与 ``query_conversations`` 分域：前者记录面向用户的多轮问答，后者记录一次可轮询、
+    可审计的执行任务。JSON 快照保留 Pi 收到的授权范围、选项与结构化 payload，不能以
+    当前默认值回填，避免事后审计失真。
+    """
+
+    __tablename__ = "task_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_request_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    spec_id: Mapped[str] = mapped_column(String(128), index=True)
+    task_kind: Mapped[str] = mapped_column(String(128), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    filters_json: Mapped[dict] = mapped_column(JSONB)
+    options_json: Mapped[dict | None] = mapped_column(JSONB)
+    payload_json: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    input: Mapped[str] = mapped_column(Text)
+    output: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    limit_hit: Mapped[str | None] = mapped_column(String(64))
+    usage_json: Mapped[dict | None] = mapped_column(JSONB)
+    turns: Mapped[int | None] = mapped_column(Integer)
+    source_details_json: Mapped[list | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaskRunEvent(Base):
+    """任务事件的脱敏审计投影；正文和检索词不得进入 ``payload``。"""
+
+    __tablename__ = "task_run_events"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 # ── 未建表(add-only 保留,后续触发式建设;见 SPEC §5 / V0.1 §1.3)──────────────
 # 注:clause_references 表结构已建(见上 ClauseReference);但其填充逻辑 ref_resolver
 #     尚未实现(§6.7,TODO 先不做)——表已就位,resolver 落地时按 §6.7 R1–R4 补写。
