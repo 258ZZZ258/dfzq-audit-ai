@@ -90,7 +90,7 @@ def _sparse_for_milvus(sparse: dict) -> dict[int, float]:
     return {int(k): float(v) for k, v in sparse.items()}
 
 
-def _to_milvus_dict(r: CorpusRow, *, bm25: bool = False) -> dict:
+def _to_milvus_dict(r: CorpusRow, *, include_sparse: bool = True) -> dict:
     d = {
         "chunk_id": r.chunk_id,
         "dense_vec": r.dense,
@@ -113,7 +113,9 @@ def _to_milvus_dict(r: CorpusRow, *, bm25: bool = False) -> dict:
         "source_code": r.source_code,
         "source_doc_id": r.source_doc_id,
     }
-    if bm25:  # BM25 function 从 text 产 sparse_vec;摄取端不写(否则 Milvus 拒插 function 输出字段)
+    if not include_sparse:
+        # BM25 的 sparse_vec 由 Milvus function 生成；纯 dense 的旧集合则根本没有该字段。
+        # 两种场景都不能让客户端提交 sparse_vec，否则 Milvus 会拒绝本次 upsert。
         del d["sparse_vec"]
     return d
 
@@ -202,10 +204,13 @@ class MilvusIO:
         if not rows:
             return 0
         bs = batch_size or self.cfg.upsert_batch
-        bm25 = self.sparse_backend == "bm25"  # bm25:剔除 sparse_vec(Milvus function 从 text 产)
+        # bge 才写客户端稀疏向量；bm25 由 function 生成，none 用于既有纯 dense 集合。
+        include_sparse = self.sparse_backend == "bge"
         col = self._collection()
         for i in range(0, len(rows), bs):
-            col.upsert([_to_milvus_dict(r, bm25=bm25) for r in rows[i : i + bs]])
+            col.upsert(
+                [_to_milvus_dict(r, include_sparse=include_sparse) for r in rows[i : i + bs]]
+            )
         return len(rows)
 
     def flush(self) -> None:

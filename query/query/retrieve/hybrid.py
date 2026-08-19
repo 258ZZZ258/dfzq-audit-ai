@@ -256,6 +256,7 @@ class Retriever:
         *,
         max_concurrency: int | None = None,
         include_superseded: bool = False,
+        corpora: tuple[str, ...] = ("P-INT",),
     ) -> list[BatchRetrievalResult]:
         """上传外规的多个条款并行检索，结果严格与输入条款同序。
 
@@ -277,8 +278,9 @@ class Retriever:
         include_superseded = _scope_superseded(scope, include_superseded)
         common = {
             "include_superseded": include_superseded,
-            # 上传的是外规，制度比对此阶段只圈定候选内规；外规自身不应作为候选混入。
-            "corpora": _corpora_for(scope, ("P-INT",), ("P-INT",)),
+            # 调用方显式指定候选语料分区。默认保持既有的外规→内规覆盖核查行为；
+            # 内规→外规则以 P-EXT 调用这一同一批量路径。
+            "corpora": _corpora_for(scope, corpora, corpora),
             "extra_expr": scope.extra_expr if scope else None,
             "partition_topk": scope.partition_topk if scope else None,
         }

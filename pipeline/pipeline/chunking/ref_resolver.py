@@ -2,7 +2,7 @@
 
 S3 条款树建成后运行的纯查表(零 LLM):扫一个 chunk 的正文,产出字面引用四类——
 R1 文档自指(本办法/本条/本章)、R2 相对条款(前条;前款款级不解析)、R3 绝对条款(第十五条)、
-R4 跨文档(《X办法》第N条 → ``PgXRefLookup`` 三级查 dict_aliases,四态)。``chunks.text`` 含面包屑
+R4 跨文档(《X办法》第N条 → ``PgXRefLookup`` 按文号/标题/别名查,四态)。``chunks.text`` 含面包屑
 前缀(内含本条条号),故扫描从 ``body_offset`` 起、且跳过 body 起始的条头自指(归一条号 == 当前
 条号)。R4《X》第N条 的「第N条」与 R3 重叠时归 R4(跨文档优先,run_resolver 去重)。``method`` 恒 rule。
 """
@@ -13,10 +13,10 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from common.pg_models import Chunk, ClauseReference, DictAlias, DocVersion
-from pipeline.chunking.normalize import normalize_clause_no
+from pipeline.chunking.normalize import normalize_clause_no, strip_ws, to_halfwidth
 from pipeline.stage_base import StageContext
 
 _CN = "〇零一二三四五六七八九十百千两"
@@ -148,8 +148,28 @@ def extract_xrefs(text: str, body_offset: int) -> list[XRefCandidate]:
     return out
 
 
+_TITLE_DISPLAY_SUFFIX = re.compile(r"(?:[（(][^()（）]{1,128}[）)])$")
+
+
+def normalize_reference_title(value: str | None) -> str:
+    """将正文引用和库内展示标题归一到可比的法规名称。
+
+    导入系统常会在 ``DocVersion.title`` 追加来源、批次、OCR 或版本说明，例如
+    ``证券公司股权管理规定（外网测试OCR）``。正文中的法条引用通常只写正式名称。
+    这里仅剥离*末尾*展示性括号后缀，保留中间的正式名称内容；同名多版本仍由
+    ``PgXRefLookup`` 返回 ``multiple``，绝不擅自挑选某一个版本。
+    """
+    title = strip_ws(to_halfwidth(value or "")).strip("《》")
+    while title:
+        trimmed = _TITLE_DISPLAY_SUFFIX.sub("", title)
+        if trimmed == title:
+            break
+        title = trimmed
+    return title
+
+
 class XRefLookup(Protocol):
-    """跨文档查询接口(R4):按文号 / 标题三级命中(生产 = PG,见 ``PgXRefLookup``)。"""
+    """跨文档查询接口(R4):按文号 / 标题 / 别名命中(生产 = PG,见 ``PgXRefLookup``)。"""
 
     def resolve(self, doc_number: str | None, title: str | None) -> XRefHit: ...
 
@@ -201,9 +221,10 @@ def align_xref(cand: XRefCandidate, lookup: XRefLookup) -> ParsedRef:
 
 
 class PgXRefLookup:
-    """生产 R4 跨文档查询(``XRefLookup`` 实现):三级命中 effective 文档,排除 ``self_dvid``。
+    """生产 R4 跨文档查询(``XRefLookup`` 实现):精确优先、规范标题兜底，排除 ``self_dvid``。
 
-    ① 文号精确 ② 标题精确 ③ ``dict_aliases`` 别名(→canonical 文号/标题回查 ①/②)。
+    ① 文号精确 ② 标题精确 ③ ``dict_aliases`` 别名(→canonical 文号/标题回查)
+    ④ 规范标题（移除导入展示后缀）回查。规范标题命中多条时仍返回 ``multiple``。
     **不限 corpus_type**(内规可引内规/外规,与案例侧限 P-EXT 有意不同);某级 ≥2 命中 → multiple。
     """
 
@@ -239,6 +260,38 @@ class PgXRefLookup:
         )
         return XRefHit("single", dv.doc_version_id, dv.doc_number, norms)
 
+    def _find_title(self, s, title: str | None) -> list:
+        """标题精确优先；否则以规范标题匹配导入展示后缀。
+
+        不将规范标题持久化为临时列，避免对既有内网库施加迁移前置条件。仅在精确
+        命中失败时才读取候选记录并二次归一过滤，保证原有标题索引仍是主路径。
+        """
+        if not title:
+            return []
+        rows = self._find(s, DocVersion.title == title)
+        if rows:
+            return rows
+        normalized = normalize_reference_title(title)
+        if not normalized:
+            return []
+        candidates = self._find(s, DocVersion.title.startswith(normalized))
+        return [row for row in candidates if normalize_reference_title(row.title) == normalized]
+
+    def _find_alias(self, s, title: str) -> DictAlias | None:
+        """精确别名优先；支持别名或正文标题带展示后缀的导入数据。"""
+        alias = s.get(DictAlias, title)
+        if alias:
+            return alias
+        normalized = normalize_reference_title(title)
+        if not normalized:
+            return None
+        matches = [
+            row
+            for row in s.scalars(select(DictAlias).where(DictAlias.alias.startswith(normalized)))
+            if normalize_reference_title(row.alias) == normalized
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def resolve(self, doc_number: str | None, title: str | None) -> XRefHit:
         with self._db.session() as s:
             if doc_number:
@@ -246,17 +299,17 @@ class PgXRefLookup:
                 if h:
                     return h
             if title:
-                h = self._hit(s, self._find(s, DocVersion.title == title))
+                h = self._hit(s, self._find_title(s, title))
                 if h:
                     return h
-                alias = s.get(DictAlias, title)  # 第三级:别名 → canonical 回查精确级
+                alias = self._find_alias(s, title)  # 第三级:别名 → canonical 回查
                 if alias and alias.canonical_doc_number:
                     rows = self._find(s, DocVersion.doc_number == alias.canonical_doc_number)
                     h = self._hit(s, rows)
                     if h:
                         return h
                 if alias and alias.canonical_title:
-                    rows = self._find(s, DocVersion.title == alias.canonical_title)
+                    rows = self._find_title(s, alias.canonical_title)
                     h = self._hit(s, rows)
                     if h:
                         return h
@@ -269,6 +322,15 @@ class ResolverResult:
     dvid: str
     refs: int  # 写入引用行数
     chunks: int  # 受检条文 chunk 数
+
+
+@dataclass(frozen=True)
+class ReferenceReconcileResult:
+    """目标法规入库后，对历史 R4 引用的回填结果。"""
+
+    target_doc_version_id: str | None
+    sources_checked: int
+    sources_rebuilt: int
 
 
 def clear_refs(ctx: StageContext, dvid: str) -> int:
@@ -298,7 +360,7 @@ def run_resolver(ctx: StageContext, dvid: str) -> ResolverResult:
     """对该 dvid 的条文 chunk 跑 R1–R4 解析,写 clause_references(先 clear 保幂等)。
 
     选块:非 parent 非 table(= 条文块)。``body_offset`` = 面包屑长度 + 1(跳过前缀里的条号)。
-    R4 跨文档经 ``PgXRefLookup`` 三级查(全块共用),失败由上层 ``_safe_refs`` 非阻断包裹。
+    R4 跨文档经 ``PgXRefLookup`` 文号/标题/别名查(全块共用),失败由上层 ``_safe_refs`` 非阻断包裹。
     """
     clear_refs(ctx, dvid)
     with ctx.db.session() as s:
@@ -327,3 +389,95 @@ def run_resolver(ctx: StageContext, dvid: str) -> ResolverResult:
     with ctx.db.session() as s:
         s.add_all(rows)
     return ResolverResult(dvid=dvid, refs=len(rows), chunks=len(clause_chunks))
+
+
+def _reference_source_ids_for_target(ctx: StageContext, target_dvid: str) -> set[str]:
+    """找出可能引用新入库目标法规、且此前尚未解析成功的有效源文档。
+
+    该筛选既识别正式标题/文号，也识别 ``dict_aliases`` 中映射到目标法规的别名。候选
+    文档随后统一重跑规则解析，避免直接更新 standoff 行导致条号、面包屑等上下文失真。
+    """
+    with ctx.db.session() as s:
+        target = s.get(DocVersion, target_dvid)
+        if target is None or target.version_status != "effective":
+            return set()
+        target_title = normalize_reference_title(target.title)
+        # canonical_title 同样可能带导入展示后缀。先利用可索引的文号/标题前缀缩小
+        # 候选集，再以内存中的规范标题作最终判断；不要求内网另建标准化字段或迁移表。
+        alias_predicates = []
+        if target.doc_number:
+            alias_predicates.append(DictAlias.canonical_doc_number == target.doc_number)
+        if target_title:
+            alias_predicates.append(DictAlias.canonical_title.startswith(target_title))
+        alias_candidates = (
+            list(s.scalars(select(DictAlias).where(or_(*alias_predicates))))
+            if alias_predicates
+            else []
+        )
+        alias_rows = [
+            row
+            for row in alias_candidates
+            if (target.doc_number and row.canonical_doc_number == target.doc_number)
+            or normalize_reference_title(row.canonical_title) == target_title
+        ]
+        titles = {target_title}
+        titles.update(normalize_reference_title(row.alias) for row in alias_rows)
+        refs = list(
+            s.execute(
+                select(ClauseReference.doc_version_id, ClauseReference.surface_text)
+                .join(DocVersion, DocVersion.doc_version_id == ClauseReference.doc_version_id)
+                .where(
+                    ClauseReference.ref_type == "R4",
+                    ClauseReference.doc_version_id != target_dvid,
+                    ClauseReference.resolution_status.in_(("pending_target", "ambiguous")),
+                    DocVersion.version_status == "effective",
+                )
+            )
+        )
+
+    source_ids: set[str] = set()
+    for source_dvid, surface in refs:
+        for candidate in extract_xrefs(surface or "", 0):
+            is_target_number = bool(
+                target.doc_number and candidate.doc_number == target.doc_number
+            )
+            is_target_title = normalize_reference_title(candidate.title) in titles
+            if is_target_number or is_target_title:
+                source_ids.add(source_dvid)
+                break
+    return source_ids
+
+
+def reconcile_target_references(ctx: StageContext, target_dvid: str) -> ReferenceReconcileResult:
+    """在一个文档成为 effective 后，回填此前尚未解析的跨文档引用。"""
+    source_ids = _reference_source_ids_for_target(ctx, target_dvid)
+    for source_dvid in sorted(source_ids):
+        run_resolver(ctx, source_dvid)
+    return ReferenceReconcileResult(
+        target_doc_version_id=target_dvid,
+        sources_checked=len(source_ids),
+        sources_rebuilt=len(source_ids),
+    )
+
+
+def reconcile_all_references(ctx: StageContext) -> ReferenceReconcileResult:
+    """全量重跑 effective 文档的 R4 解析，供首次迁移/字典批量维护后执行。"""
+    with ctx.db.session() as s:
+        source_ids = set(
+            s.scalars(
+                select(ClauseReference.doc_version_id)
+                .join(DocVersion, DocVersion.doc_version_id == ClauseReference.doc_version_id)
+                .where(
+                    ClauseReference.ref_type == "R4",
+                    DocVersion.version_status == "effective",
+                )
+                .distinct()
+            )
+        )
+    for source_dvid in sorted(source_ids):
+        run_resolver(ctx, source_dvid)
+    return ReferenceReconcileResult(
+        target_doc_version_id=None,
+        sources_checked=len(source_ids),
+        sources_rebuilt=len(source_ids),
+    )

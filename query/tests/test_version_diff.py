@@ -44,6 +44,16 @@ def test_same_unique_text_at_a_new_path_is_reported_as_moved_not_added_and_remov
     ]
 
 
+def test_equivalent_arabic_and_chinese_article_labels_are_unchanged():
+    """`1` 和 `第一条` 是同一条款号，不能误报为位置调整。"""
+    changes = diff_clauses(
+        [_c("1", "正文未改")],
+        [_c("第一条", "正文未改")],
+    )
+
+    assert changes == []
+
+
 def test_permuted_existing_paths_are_reported_as_moved_before_same_path_changes():
     """第 4/5/6 条互换位置时，路径仍重叠，不能被同路径比较抢先误判为修改。"""
     changes = diff_clauses(

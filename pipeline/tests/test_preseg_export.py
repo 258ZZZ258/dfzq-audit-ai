@@ -16,7 +16,7 @@ from pipeline.preseg.reader import (
     validate_manifest_header,
     validate_manifest_rows,
 )
-from pipeline.preseg_export import DmSource
+from pipeline.preseg_export import DmSource, _LAW_COLS
 
 
 class FakeSource(export.Source):
@@ -198,6 +198,48 @@ def test_safe_filename_injective():
     # 不同 CODE 清洗后同基名,哈希后缀保证单射(不覆盖)
     a, b = export._safe_filename("A/B"), export._safe_filename("A?B")
     assert a != b and a.startswith("A_B-") and b.startswith("A_B-")
+
+
+def test_source_export_reads_both_sides_of_explicit_version_chain():
+    """适配器不能只读取 SOURCE_LAW_ID，旧版本的 NEW_CODE 与旧记录主键也必须保留。"""
+    assert "ID" in _LAW_COLS
+    assert "NEW_CODE" in _LAW_COLS
+    assert "SOURCE_LAW_ID" in _LAW_COLS
+
+
+def test_explicit_source_version_chain_maps_to_supersedes_and_orders_predecessor_first(tmp_path):
+    """SOURCE_LAW_ID 可引用旧法规的 CODE 或主键 ID，导出时须成为 S0 可解析的文件名链。"""
+    class VersionChainSource(FakeSource):
+        def iter_laws(self):
+            # 故意把新版本放在前面，验证导出不会依赖源库的物理返回顺序。
+            return [
+                {"ID": "row-new", "CODE": "LAW-NEW", "NAME": "同一外规", "SCOPE": 0,
+                 "SOURCE_LAW_ID": "row-old", "EFFECT_DATE": "2026-08-12",
+                 "STATUS_CODE": "inuse", "DEL_FLAG": "A"},
+                {"ID": "row-old", "CODE": "LAW-OLD", "NAME": "同一外规", "SCOPE": 0,
+                 "NEW_CODE": "LAW-NEW", "EFFECT_DATE": "2024-01-01",
+                 "STATUS_CODE": "modified", "DEL_FLAG": "A"},
+            ]
+
+        def contents_for(self, law_code):
+            return [{"CODE": f"{law_code}-C1", "IS_CATALOG": 0, "TITLE": "第一条",
+                     "INDEX_NO": 1, "CONTENT": f"{law_code} 正文", "DEL_FLAG": "A"}]
+
+        def content_details_for(self, law_code):
+            return []
+
+        def iter_cases(self):
+            return []
+
+    export.build_batch(VersionChainSource(), tmp_path)
+    _, rows = _manifest_rows(tmp_path)
+
+    assert [row["source_doc_id"] for row in rows] == ["LAW-OLD", "LAW-NEW"]
+    assert rows[0]["supersedes"] is None
+    assert rows[1]["supersedes"] == export._safe_filename("LAW-OLD")
+    # EFFECT_DATE 是唯一的业务版本时间；适配层不得以 DATA_VERSION 伪造版本日期。
+    assert rows[0]["effective_date"] == "2024-01-01"
+    assert rows[1]["effective_date"] == "2026-08-12"
 
 
 def test_refuse_nonempty_out_dir(tmp_path):

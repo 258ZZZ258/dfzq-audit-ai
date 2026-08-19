@@ -40,6 +40,18 @@ def test_configured_audit_log_env_passes(monkeypatch, tmp_path):
     assert server_mod.require_audit_log_path() == str(path)
 
 
+def test_clause_ids_include_nested_batch_candidates_for_audit_reconciliation():
+    """批量检索的 item 是输入占位，真正回查键在 candidates 内。"""
+    assert server_mod._clause_ids_of(
+        {
+            "items": [
+                {"query_index": 0, "candidates": [{"chunk_id": "INT-1"}, {"chunk_id": "INT-2"}]},
+                {"query_index": 1, "candidates": [{"chunk_id": "INT-1"}]},
+            ]
+        }
+    ) == ["INT-1", "INT-2"]
+
+
 # ---------------------------------------------------------------------------
 # 真 spawn:above 三条只直接调 require_audit_log_path(),从不经过 main()。
 # 那证明的是"校验函数本身对",不证明 main() 第一行真的调用了它 —— 有人把那行删掉,

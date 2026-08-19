@@ -336,7 +336,13 @@ def case_record(case: dict, parties: list[dict], punishes: list[dict]) -> dict:
     return rec
 
 
-def manifest_row(law: dict, blocks: list[dict], filename: str) -> dict:
+def manifest_row(
+    law: dict,
+    blocks: list[dict],
+    filename: str,
+    *,
+    supersedes_filename: str | None = None,
+) -> dict:
     """LAW_BASIC + 其 blocks → manifest 行(21 列全集)。分类走 SCOPE(fail-closed);
     落 PG 定长列经 ``_bound`` 超宽即拒收(不截断法律元数据;Codex 二轮 F2)。
 
@@ -368,10 +374,11 @@ def manifest_row(law: dict, blocks: list[dict], filename: str) -> dict:
         tags=_s(law.get("TAG")),
         file_no=_bound(law.get("DOC_NO"), "file_no"),
         source_law_id=_bound(law.get("SOURCE_LAW_ID"), "source_law_id"),
+        # S0 的 version_chain 以导出 blocks 文件名解析前序版本，不能直接放源 CODE/ID。
+        supersedes=supersedes_filename,
         entity_types=entity_types_of(law.get("SUIT_OBJ_CODE")),  # 适用对象(D7,写投影)
         source_created_by=_bound(law.get("CREATOR_ID"), "source_created_by"),  # 源创建人(R5)
     )
-    # biz_domain:LAW_BASIC 无干净专列(仍 seam);supersedes 由 SOURCE_LAW_ID/ABOLISH_CODE 生成待定
     return row
 
 
@@ -380,6 +387,74 @@ def _safe_filename(law_code: str) -> str:
     承 s0 ``fn==Path(fn).name`` 防穿越)。"""
     base = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in law_code)[:40] or "law"
     return f"{base}-{hashlib.sha1(law_code.encode('utf-8')).hexdigest()[:8]}"  # noqa: S324
+
+
+def _version_predecessors(laws: list[dict]) -> dict[str, str]:
+    """解析源库显式版本链，返回 ``当前 CODE -> 前序 CODE``。
+
+    ``SOURCE_LAW_ID`` 在不同部署中可能存放旧记录的 ``CODE`` 或主键 ``ID``；两种均支持。
+    某些来源只在旧记录写 ``NEW_CODE``，此时以唯一反向链接补齐。绝不按名称、DATA_VERSION
+    或日期猜测版本关系，避免把同名但独立的法规误合并。
+    """
+    by_code: dict[str, dict] = {}
+    code_by_id: dict[str, str] = {}
+    successor_to_predecessors: dict[str, list[str]] = {}
+    for law in laws:
+        code = _s(law.get("CODE"))
+        if not code or code in by_code:
+            continue
+        by_code[code] = law
+        if source_id := _s(law.get("ID")):
+            code_by_id[source_id] = code
+        if successor := _s(law.get("NEW_CODE")):
+            successor_to_predecessors.setdefault(successor, []).append(code)
+
+    predecessors: dict[str, str] = {}
+    for code, law in by_code.items():
+        prior = None
+        if reference := _s(law.get("SOURCE_LAW_ID")):
+            prior = reference if reference in by_code else code_by_id.get(reference)
+        if prior is None:
+            candidates = successor_to_predecessors.get(code, [])
+            if len(candidates) == 1:
+                prior = candidates[0]
+        if prior and prior != code:
+            predecessors[code] = prior
+    return predecessors
+
+
+def _version_order(laws: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """稳定地将同批次版本链排为旧→新，保证 S0 注册时可解析 ``supersedes``。"""
+    by_code: dict[str, dict] = {}
+    without_code: list[dict] = []
+    for law in laws:
+        code = _s(law.get("CODE"))
+        if not code:
+            without_code.append(law)
+        elif code not in by_code:
+            by_code[code] = law
+
+    predecessors = _version_predecessors(list(by_code.values()))
+    ordered_codes: list[str] = []
+    completed: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(code: str) -> None:
+        if code in completed:
+            return
+        if code in visiting:  # 脏数据环：保留稳定输出，交由 S0 的链校验留痕。
+            return
+        visiting.add(code)
+        prior = predecessors.get(code)
+        if prior in by_code:
+            visit(prior)
+        visiting.discard(code)
+        completed.add(code)
+        ordered_codes.append(code)
+
+    for code in sorted(by_code):
+        visit(code)
+    return [by_code[code] for code in ordered_codes] + without_code, predecessors
 
 
 # ── 编排 + 落盘 ──────────────────────────────────────────────────────────────
@@ -418,7 +493,8 @@ def _build_into(source: Source, work: Path) -> dict:
     skipped: list[str] = []
     seen_keys: set[str] = set()
     seen_files: set[str] = set()
-    for law in _live(source.iter_laws()):
+    live_laws, predecessors = _version_order(_live(source.iter_laws()))
+    for law in live_laws:
         code = _s(law.get("CODE"))
         if not code:
             skipped.append("(law 无 CODE)")
@@ -442,7 +518,19 @@ def _build_into(source: Source, work: Path) -> dict:
             if fn in seen_files:  # 哈希后缀后仍撞(极罕见)→ 拒收该件不覆盖
                 skipped.append(f"文件名碰撞 CODE={code}")
                 continue
-            row = manifest_row(law, blocks, fn)
+            predecessor_code = predecessors.get(code)
+            row = manifest_row(
+                law,
+                blocks,
+                fn,
+                supersedes_filename=(
+                    _safe_filename(predecessor_code) if predecessor_code else None
+                ),
+            )
+            if predecessor_code and not row["effective_date"]:
+                warnings.append(
+                    f"版本链新版本缺 EFFECT_DATE，版本展示将标记未维护 CODE={code}"
+                )
         except PresegExportError as e:  # fail-closed(SCOPE 不可判 / 字段超列宽)→ 拒收该件 + 审计
             skipped.append(str(e))
             continue

@@ -84,6 +84,15 @@ def test_retrieve_batch_isolates_one_clause_failure():
     assert rows[2].candidates and rows[2].error is None
 
 
+def test_retrieve_batch_can_route_to_external_corpus():
+    retriever, _embed, _milvus = _retriever()
+
+    rows = retriever.retrieve_batch(["内规义务条款"], corpora=("P-EXT",))
+
+    assert rows[0].candidates
+    assert {candidate.corpus_type for candidate in rows[0].candidates} == {"P-EXT"}
+
+
 def test_retrieve_batch_rejects_non_positive_concurrency():
     retriever, _embed, _milvus = _retriever()
 
