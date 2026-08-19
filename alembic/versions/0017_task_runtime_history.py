@@ -40,9 +40,13 @@ def upgrade() -> None:
         sa.Column("source_details_json", postgresql.JSONB(astext_type=sa.Text())),
         sa.Column("started_at", sa.DateTime(timezone=True)),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("created_by", sa.String(length=64)),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("updated_by", sa.String(length=64)),
     )
     for name, columns in (
@@ -57,7 +61,12 @@ def upgrade() -> None:
 
     op.create_table(
         "task_run_events",
-        sa.Column("run_id", sa.String(length=64), sa.ForeignKey("task_runs.run_id", ondelete="CASCADE"), primary_key=True),
+        sa.Column(
+            "run_id",
+            sa.String(length=64),
+            sa.ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
         sa.Column("seq", sa.Integer(), primary_key=True),
         sa.Column("event_ts", sa.DateTime(timezone=True), nullable=False),
         sa.Column("event_type", sa.String(length=64), nullable=False),
