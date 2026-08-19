@@ -30,6 +30,8 @@ from query.mcp.tools import (
     enumerate_clauses,
     get_clause_detail,
     list_internal_obligations,
+    retrieve_external_candidates_batch,
+    retrieve_internal_candidates_batch,
     resolve_source_law,
     search_cases,
     search_policy,
@@ -44,6 +46,8 @@ _TOOL_MODULES = (
     get_clause_detail,
     assess_sufficiency,
     list_internal_obligations,
+    retrieve_internal_candidates_batch,
+    retrieve_external_candidates_batch,
     resolve_source_law,
 )
 _BY_NAME = {m.TOOL.name: m for m in _TOOL_MODULES}
@@ -185,16 +189,29 @@ async def _on_call_tool(ctx, params: t.CallToolRequestParams) -> t.CallToolResul
 
 
 def _clause_ids_of(result: dict) -> list[str]:
-    """从工具返回里抽 clause_id,供 A6 对账。形状随工具而异,抽不到就空。"""
+    """从工具返回里抽 clause_id,供 A6 对账。形状随工具而异,抽不到就空。
+
+    ``retrieve_internal_candidates_batch`` 的权威回查键位于
+    ``items[].candidates[]``。不能只看外层 item：它本身是输入条款的占位，
+    没有 ``chunk_id``，会让一次真实命中的批量检索在审计中伪装成空结果。
+    """
+    ids: list[str] = []
+
+    def collect(rows: object) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            clause_id = row.get("clause_id", row.get("chunk_id"))
+            if isinstance(clause_id, str):
+                ids.append(clause_id)
+            # 批量候选的回查键是嵌套的；其他工具没有 candidates 时这是无操作。
+            collect(row.get("candidates"))
+
     for key in ("hits", "items", "cases"):
-        rows = result.get(key)
-        if isinstance(rows, list):
-            return [
-                r.get("clause_id", r.get("chunk_id"))
-                for r in rows
-                if isinstance(r, dict) and isinstance(r.get("clause_id", r.get("chunk_id")), str)
-            ]
-    return []
+        collect(result.get(key))
+    return list(dict.fromkeys(ids))
 
 
 def require_audit_log_path() -> str:

@@ -16,6 +16,7 @@ from pipeline.chunking.ref_resolver import (
     XRefHit,
     align_xref,
     extract_xrefs,
+    normalize_reference_title,
     resolve_refs,
     run_resolver,
 )
@@ -265,6 +266,11 @@ def test_extract_no_book_title_no_candidate():
     assert extract_xrefs("本办法依据有关法律制定", 0) == []
 
 
+def test_normalize_reference_title_removes_import_display_suffix():
+    """导入来源/批次等展示后缀不应阻断正文《法规名》的跨文档引用。"""
+    assert normalize_reference_title("《证券公司股权管理规定（外网测试OCR）》") == "证券公司股权管理规定"
+
+
 # ── R4 跨文档:align_xref 四态(注入 fake lookup,无栈,T2)─────────────────────
 class _FakeLookup:
     def __init__(self, hit):
@@ -368,6 +374,15 @@ def test_pglookup_by_number(xref_stack):
 
 def test_pglookup_by_title(xref_stack):
     pg, dv_ext, dv_self, title, num, alias = xref_stack
+    hit = PgXRefLookup(pg, dv_self).resolve(None, title)
+    assert hit.status == "single" and hit.doc_version_id == dv_ext
+
+
+def test_pglookup_by_normalized_title(xref_stack):
+    """库内展示标题有导入后缀时，正文的规范标题仍应可解析。"""
+    pg, dv_ext, dv_self, title, num, alias = xref_stack
+    with pg.session() as s:
+        s.get(DocVersion, dv_ext).title = f"{title}（外网测试OCR）"
     hit = PgXRefLookup(pg, dv_self).resolve(None, title)
     assert hit.status == "single" and hit.doc_version_id == dv_ext
 

@@ -11,6 +11,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+
+from pipeline.chunking.normalize import normalize_clause_no, strip_ws, to_halfwidth
 
 
 @dataclass(frozen=True)
@@ -47,19 +50,69 @@ def _aggregate(chunks: list) -> dict[str, str]:
     }
 
 
+def _canonical_clause_path(path: str) -> str:
+    """用于版本对齐的条款路径规范形，保留原始路径供界面展示。
+
+    历史导入数据有时写 ``1``，有时写 ``第一条``。二者是同一条款号，不能因
+    字面格式不同而产生一次 ``moved``。路径可能带章节层级，因此只规范可识别的
+    "第 X 条" / "X" 叶子节点；其它层级原样保留，避免把未知路径误合并。
+    """
+    value = strip_ws(to_halfwidth(str(path or "")))
+    if not value:
+        return value
+
+    def canonical_part(part: str) -> str:
+        match = re.fullmatch(r"第(.+)条", part)
+        clause_no = match.group(1) if match else part
+        try:
+            return normalize_clause_no(clause_no)
+        except ValueError:
+            return part
+
+    return "/".join(canonical_part(part) for part in value.split("/"))
+
+
 def diff_clauses(old: list, new: list) -> list[ClauseChange]:
     """聚合子块 → 对齐 → 变更项(added/removed/changed/moved),按路径字符串稳定输出。"""
     old_map = _aggregate(old)
     new_map = _aggregate(new)
 
     changes: list[ClauseChange] = []
+    # 先对齐仅因条款号书写形式不同的条款（如 ``1`` / ``第一条``）。
+    # 不能用原始 path 直接比较，否则它们会在下方的同正文匹配中被误判为 moved。
+    old_by_canonical_path: dict[str, list[str]] = {}
+    new_by_canonical_path: dict[str, list[str]] = {}
+    for path in old_map:
+        old_by_canonical_path.setdefault(_canonical_clause_path(path), []).append(path)
+    for path in new_map:
+        new_by_canonical_path.setdefault(_canonical_clause_path(path), []).append(path)
+
+    equivalent_path_pairs: dict[str, str] = {}
+    for canonical_path, old_paths in old_by_canonical_path.items():
+        new_paths = new_by_canonical_path.get(canonical_path, [])
+        # 仅处理两侧唯一的非原始同名路径，避免重复脏数据被不安全地合并。
+        if len(old_paths) == 1 and len(new_paths) == 1 and old_paths[0] != new_paths[0]:
+            equivalent_path_pairs[new_paths[0]] = old_paths[0]
+
+    equivalent_old_paths = set(equivalent_path_pairs.values())
+    equivalent_new_paths = set(equivalent_path_pairs)
+    for new_path, old_path in equivalent_path_pairs.items():
+        if old_map[old_path] != new_map[new_path]:
+            changes.append(
+                ClauseChange(new_path, "changed", old_map[old_path], new_map[new_path])
+            )
+
     # 全局先配对两侧唯一的完全相同正文。不能只看 old_only/new_only：条款互换位置时
     # 两个路径依旧同时存在，先做同路径比较会把纯位置调整误判成 changed。
     old_text_paths: dict[str, list[str]] = {}
     new_text_paths: dict[str, list[str]] = {}
     for path, text in old_map.items():
+        if path in equivalent_old_paths:
+            continue
         old_text_paths.setdefault(text, []).append(path)
     for path, text in new_map.items():
+        if path in equivalent_new_paths:
+            continue
         new_text_paths.setdefault(text, []).append(path)
     moved_pairs = {
         new_paths[0]: old_paths[0]
@@ -74,12 +127,12 @@ def diff_clauses(old: list, new: list) -> list[ClauseChange]:
     old_only = {
         path: text
         for path, text in old_map.items()
-        if path not in new_map and path not in moved_old_paths
+        if path not in new_map and path not in moved_old_paths and path not in equivalent_old_paths
     }
     new_only = {
         path: text
         for path, text in new_map.items()
-        if path not in old_map and path not in moved_new_paths
+        if path not in old_map and path not in moved_new_paths and path not in equivalent_new_paths
     }
 
     for path in sorted(set(old_map) & set(new_map)):

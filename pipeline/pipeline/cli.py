@@ -230,6 +230,14 @@ def _finalize_if_indexed(pg: PgIO, ctx: StageContext, dvid: str) -> str | None:
     except ColdBackupIncomplete as e:  # 旧版冷备缺失:已 INDEXED 但切换未完成 → 回带 error
         typer.echo(f"  ✗ 版本切换失败(旧版冷备缺失,可重试):{e}")
         return str(e)
+    # 新法规入库/生效后，回填此前 pending_target 的历史 R4 跨文档引用。该步骤只重算
+    # 候选源文档，解析失败不影响已经完成的索引与版本切换。
+    try:
+        reconciled = ref_resolver.reconcile_target_references(ctx, dvid)
+        if reconciled.sources_rebuilt:
+            typer.echo(f"  引用回填:重解析 {reconciled.sources_rebuilt} 个历史文档")
+    except Exception as e:  # noqa: BLE001 引用回填可由 CLI 全量重试，不阻断发布
+        logger.warning("R4 引用回填 %s 失败(不阻断):%s", dvid, e)
     return None
 
 
@@ -346,6 +354,31 @@ def status(batch: str | None = typer.Argument(None, help="批次 id(省略=全�
         typer.echo("(无文档)")
         return
     _print_status(docs)
+
+
+@app.command("reconcile-references")
+def reconcile_references(
+    target_doc_version_id: str | None = typer.Option(
+        None, "--target-doc-version-id", "-t", help="新入库并已生效的目标文档版本"
+    ),
+    all_documents: bool = typer.Option(
+        False, "--all", help="全量重跑所有有效文档的跨文档引用（首次迁移/字典批量维护后使用）"
+    ),
+) -> None:
+    """回填 R4 跨文档引用，不依赖导入批次命名或某个具体法规。"""
+    if bool(target_doc_version_id) == all_documents:
+        typer.echo("✗ 请二选一：--target-doc-version-id 或 --all")
+        raise typer.Exit(2)
+    _, ctx = _context()
+    if all_documents:
+        result = ref_resolver.reconcile_all_references(ctx)
+        typer.echo(f"✓ 全量引用对账完成：重解析 {result.sources_rebuilt} 个有效文档")
+        return
+    result = ref_resolver.reconcile_target_references(ctx, target_doc_version_id)
+    typer.echo(
+        f"✓ 目标引用对账完成：target={target_doc_version_id}，"
+        f"重解析 {result.sources_rebuilt} 个历史文档"
+    )
 
 
 # ── 统一审核队列 ────────────────────────────────────────────────

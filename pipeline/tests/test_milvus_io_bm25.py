@@ -29,14 +29,20 @@ def _row(cid: str, text: str) -> CorpusRow:
 
 # ── 单元(零栈):upsert payload 分形态 ──
 def test_to_milvus_dict_bm25_drops_sparse():
-    d = _to_milvus_dict(_row("c1", "文本"), bm25=True)
+    d = _to_milvus_dict(_row("c1", "文本"), include_sparse=False)
     assert "sparse_vec" not in d  # Milvus function 产出字段,摄取端不写
     assert d["text"] == "文本"  # BM25 输入保留
 
 
 def test_to_milvus_dict_bge_keeps_sparse():
-    d = _to_milvus_dict(_row("c1", "文本"), bm25=False)
+    d = _to_milvus_dict(_row("c1", "文本"), include_sparse=True)
     assert d["sparse_vec"] == {1: 0.9}  # bge:客户端稀疏写入(byte 等价)
+
+
+def test_to_milvus_dict_dense_only_drops_sparse():
+    """纯 dense 集合没有 sparse_vec 字段，写入不得携带客户端稀疏向量。"""
+    d = _to_milvus_dict(_row("c1", "文本"), include_sparse=False)
+    assert "sparse_vec" not in d
 
 
 # ── 集成(真栈 Milvus 2.5)──

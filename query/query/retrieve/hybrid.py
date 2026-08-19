@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import contextvars
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
@@ -122,6 +123,15 @@ class Candidate:
     rerank_score: float | None = None  # 重排器相关性绝对分(仅 rerank 开时填;RRF 融合分见 score)
     source_code: str | None = None  # DM LAW_CONTENT.CODE(Java 回查达梦键;非 DM 源/弃锚为空)
     source_doc_id: str | None = None  # DM LAW_BASIC.CODE(文档级)
+
+
+@dataclass(frozen=True)
+class BatchRetrievalResult:
+    """一条上传条款的内规候选；单条失败不影响同批其他条款。"""
+
+    query: str
+    candidates: list[Candidate]
+    error: str | None = None
 
 
 def _to_candidate(hit: dict, mode: str) -> Candidate:
@@ -240,6 +250,95 @@ class Retriever:
         _collect(scope, out)
         return out
 
+    def retrieve_batch(
+        self,
+        queries: list[str],
+        *,
+        max_concurrency: int | None = None,
+        include_superseded: bool = False,
+        corpora: tuple[str, ...] = ("P-INT",),
+    ) -> list[BatchRetrievalResult]:
+        """上传外规的多个条款并行检索，结果严格与输入条款同序。
+
+        嵌入模型只在调用线程中做一次批量编码，避免本地 BGE-M3 并发推理争抢内存；随后仅将
+        Milvus 检索放入有界线程池。重排仍在调用线程串行执行，避免非线程安全的重排模型被并发
+        调用。任一条款检索失败仅在该条结果标记 ``error``，整批继续返回。
+        """
+        if not queries:
+            return []
+        workers = (
+            self._qcfg.batch_retrieve_concurrency
+            if max_concurrency is None
+            else max_concurrency
+        )
+        if workers < 1:
+            raise ValueError("max_concurrency 必须大于 0")
+
+        scope = _SCOPE.get()
+        include_superseded = _scope_superseded(scope, include_superseded)
+        common = {
+            "include_superseded": include_superseded,
+            # 调用方显式指定候选语料分区。默认保持既有的外规→内规覆盖核查行为；
+            # 内规→外规则以 P-EXT 调用这一同一批量路径。
+            "corpora": _corpora_for(scope, corpora, corpora),
+            "extra_expr": scope.extra_expr if scope else None,
+            "partition_topk": scope.partition_topk if scope else None,
+        }
+        results: list[BatchRetrievalResult | None] = [None] * len(queries)
+        prepared = self._prepare_batch_embeddings(queries, results)
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(queries))) as executor:
+            futures = {
+                executor.submit(
+                    self._search_candidates_from_vectors, query, dense, sparse, **common
+                ): index
+                for index, (query, dense, sparse) in prepared.items()
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    ranked = sorted(future.result().values(), key=lambda c: c.score, reverse=True)
+                    ranked = [
+                        replace(c, rerank_score=score) if score is not None else c
+                        for c, score in self._reranker.rerank_scored(queries[index], ranked)
+                    ]
+                    topk = scope.topk if scope and scope.topk else self._qcfg.topk
+                    results[index] = BatchRetrievalResult(queries[index], ranked[:topk])
+                except Exception:
+                    results[index] = BatchRetrievalResult(queries[index], [], "检索失败")
+
+        out = [row for row in results if row is not None]
+        for row in out:
+            _collect(scope, row.candidates)
+        return out
+
+    def _prepare_batch_embeddings(
+        self, queries: list[str], results: list[BatchRetrievalResult | None]
+    ) -> dict[int, tuple[str, list[float], dict]]:
+        """批量编码优先；若整批编码失败，按条回退以隔离坏条款。"""
+        try:
+            embeddings = self._embed.embed(queries)
+            if len(embeddings) != len(queries):
+                raise ValueError("嵌入结果数量不匹配")
+        except Exception:
+            embeddings = []
+            for index, query in enumerate(queries):
+                try:
+                    embeddings.append(self._embed.embed([query])[0])
+                except Exception:
+                    results[index] = BatchRetrievalResult(query, [], "嵌入失败")
+                    embeddings.append(None)
+
+        prepared: dict[int, tuple[str, list[float], dict]] = {}
+        for index, (query, emb) in enumerate(zip(queries, embeddings, strict=True)):
+            if emb is None:
+                continue
+            try:
+                prepared[index] = (query, emb.dense, self._sparse_for(query, emb))
+            except Exception:
+                results[index] = BatchRetrievalResult(query, [], "嵌入失败")
+        return prepared
+
     def _subqueries_for(self, query: str) -> list[str]:
         """§3.3 N3:decompose 开+gateway → 复合问句拆子查询;否则/单跳/失败 → ``[query]``(直通)。"""
         if self._decompose_llm is None:
@@ -269,6 +368,30 @@ class Retriever:
         emb = self._embed.embed([query])[0]
         dense = self._dense_for(query, emb)    # §3.1 HyDE(关/stub → emb.dense,byte 等价)
         sparse = self._sparse_for(query, emb)  # §5.4 提权/扩展(双关关 → emb.sparse,byte 等价)
+        return self._search_candidates_from_vectors(
+            query, dense, sparse,
+            include_superseded=include_superseded,
+            corpora=corpora,
+            extra_expr=extra_expr,
+            partition_topk=partition_topk,
+            with_text=with_text,
+        )
+
+    def _search_candidates_from_vectors(
+        self,
+        query: str,
+        dense: list[float],
+        sparse: dict,
+        *,
+        include_superseded: bool = False,
+        corpora: tuple[str, ...] = _PARTITIONS,
+        extra_expr: str | None = None,
+        partition_topk: int | None = None,
+        with_text: bool | None = None,
+    ) -> dict[str, Candidate]:
+        """已完成嵌入的单条查询执行分区检索；供常规/批量检索共用。"""
+        if with_text is None:
+            with_text = self._qcfg.rerank_backend != "none"
         found: dict[str, Candidate] = {}
         for corpus in corpora:
             res = self._milvus.search(
