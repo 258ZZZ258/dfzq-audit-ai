@@ -8,8 +8,8 @@ new source adapters can provide their official code/display name directly.
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
+import sqlalchemy as sa
 
 revision: str = "0016_doc_version_meta"
 down_revision: str | None = "0015_preseg_source_align"
@@ -19,10 +19,15 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("doc_versions", sa.Column("version_code", sa.String(length=64), nullable=True))
-    op.add_column("doc_versions", sa.Column("version_display_name", sa.String(length=128), nullable=True))
+    op.add_column(
+        "doc_versions", sa.Column("version_display_name", sa.String(length=128), nullable=True)
+    )
     op.add_column("doc_versions", sa.Column("revision_no", sa.Integer(), nullable=True))
     op.create_index(
-        op.f("ix_doc_versions_logical_revision"), "doc_versions", ["logical_id", "revision_no"], unique=True
+        op.f("ix_doc_versions_logical_revision"),
+        "doc_versions",
+        ["logical_id", "revision_no"],
+        unique=True,
     )
     # 历史数据没有业务版号：按明确的替代链补一个稳定的迁移序号，不冒充源系统正式版本号。
     op.execute(
