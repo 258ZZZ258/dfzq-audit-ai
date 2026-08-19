@@ -164,7 +164,12 @@ def test_roundtrips_through_preseg_export_detail_fallback():
     blocks = blocks_from_contents(
         _upper(dm.contents), [], content_details=_upper(dm.content_details)
     )
-    got = {b["clause_label"]: b["text"] for b in blocks if not b["is_catalog"]}
+    got_parts: dict[str, list[str]] = {}
+    for block in blocks:
+        if block["is_catalog"]:
+            continue
+        got_parts.setdefault(block["clause_label"], []).append(block["text"])
+    got = {label: "\n".join(parts) for label, parts in got_parts.items()}
     assert got == {
         "第一条": "第一条 甲乙丙。\n(一)子项一。\n(二)子项二。",
         "第二条": "第二条 丁。",

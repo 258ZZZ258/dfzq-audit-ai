@@ -154,7 +154,8 @@ class VersionDiffDocument(BaseModel):
     doc_version_id: str
     title: str
     version_label: str
-    version_status: str
+    # 新版库返回真实状态；旧 DocumentLibrary 实现未提供该字段时保持历史响应可解析。
+    version_status: str = "effective"
     version_code: str | None = None
     version_display_name: str | None = None
     revision_no: int | None = None
