@@ -29,7 +29,13 @@ def pg():
     from pipeline.config import load_config
     from pipeline.index.pg_io import PgIO
 
-    return PgIO.from_config(load_config())
+    store = PgIO.from_config(load_config())
+    try:
+        with store.session() as session:
+            session.execute(text("select 1"))
+    except Exception as exc:
+        pytest.skip(f"PG 不可达，统计权限集成测试跳过: {exc}")
+    return store
 
 
 @pytest.fixture
