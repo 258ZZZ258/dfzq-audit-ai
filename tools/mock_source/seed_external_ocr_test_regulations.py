@@ -30,7 +30,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-
 TEST_BATCH_DATE = date(2026, 8, 13)
 TEST_CREATOR = "external_ocr_test"
 

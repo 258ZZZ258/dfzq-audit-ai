@@ -7,7 +7,6 @@ from query.mcp.session import RunRegistry
 from query.mcp.tools import retrieve_external_candidates_batch, retrieve_internal_candidates_batch
 from query.retrieve.hybrid import BatchRetrievalResult, Candidate
 
-
 AUTH = AuthScope(perm_tags=["内部"], corpus_types=["internal"], run_id="run-1")
 
 
@@ -48,11 +47,15 @@ def test_returns_authoritative_internal_candidates_in_input_order_and_registers_
             "retriever": retriever,
             "pg": object(),
             "registry": registry,
-            "fetch_anchors": lambda _pg, ids: {
-                "C-1": SimpleNamespace(doc_title="内规", doc_no="内规〔2026〕1号", clause_path="第三条", source_code="INT-1")
-                for _ in ids
+            "fetch_anchors": lambda _pg, _ids: {
+                "C-1": SimpleNamespace(
+                    doc_title="内规",
+                    doc_no="内规〔2026〕1号",
+                    clause_path="第三条",
+                    source_code="INT-1",
+                )
             },
-            "fetch_texts": lambda _pg, ids: {"C-1": "内规第三条正文" for _ in ids},
+            "fetch_texts": lambda _pg, _ids: {"C-1": "内规第三条正文"},
         },
     )
 

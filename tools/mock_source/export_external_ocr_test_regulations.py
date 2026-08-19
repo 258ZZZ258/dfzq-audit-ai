@@ -13,7 +13,6 @@ from pathlib import Path
 
 from pipeline.preseg.export import build_batch
 from pipeline.preseg_export import DmSource
-
 from tools.mock_source.seed_external_ocr_test_regulations import SPECS
 
 

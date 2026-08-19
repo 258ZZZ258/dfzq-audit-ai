@@ -7,9 +7,9 @@ Revises: 0016_doc_version_meta
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision: str = "0017_task_runtime_history"
 down_revision: str | None = "0016_doc_version_meta"

@@ -30,9 +30,9 @@ from query.mcp.tools import (
     enumerate_clauses,
     get_clause_detail,
     list_internal_obligations,
+    resolve_source_law,
     retrieve_external_candidates_batch,
     retrieve_internal_candidates_batch,
-    resolve_source_law,
     search_cases,
     search_policy,
 )

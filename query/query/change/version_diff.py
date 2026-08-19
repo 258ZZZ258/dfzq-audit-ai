@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 from pipeline.chunking.normalize import normalize_clause_no, strip_ws, to_halfwidth
 

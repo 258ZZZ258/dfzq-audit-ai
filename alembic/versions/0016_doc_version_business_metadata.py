@@ -8,8 +8,9 @@ new source adapters can provide their official code/display name directly.
 
 from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = "0016_doc_version_meta"
 down_revision: str | None = "0015_preseg_source_align"

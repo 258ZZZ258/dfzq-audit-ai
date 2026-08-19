@@ -16,7 +16,7 @@ from pipeline.preseg.reader import (
     validate_manifest_header,
     validate_manifest_rows,
 )
-from pipeline.preseg_export import DmSource, _LAW_COLS
+from pipeline.preseg_export import _LAW_COLS, DmSource
 
 
 class FakeSource(export.Source):

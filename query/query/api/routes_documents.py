@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
 from datetime import date
+from pathlib import PurePosixPath
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import select
 
 from pipeline.config import load_config
 from pipeline.index.object_store import ObjectStore

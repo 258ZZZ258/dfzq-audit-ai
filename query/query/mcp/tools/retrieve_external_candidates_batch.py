@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import mcp.types as t
 
-from query.mcp.scope import AuthScope, ScopeError, build_retrieval_scope
+from query.mcp.scope import AuthScope, build_retrieval_scope
 from query.mcp.tools.retrieve_internal_candidates_batch import _validate
-
 
 TOOL = t.Tool(
     name="retrieve_external_candidates_batch",
