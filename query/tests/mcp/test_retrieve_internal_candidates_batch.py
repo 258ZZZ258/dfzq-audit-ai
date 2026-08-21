@@ -86,6 +86,34 @@ def test_external_only_authorization_returns_one_empty_item_per_clause_without_r
     assert out == {"items": [{"query_index": 0, "candidates": [], "error": None}], "total": 1}
 
 
+def test_filters_internal_candidates_to_the_requested_target_effective_date_range() -> None:
+    registry = RunRegistry()
+    retriever = FakeRetriever()
+    filtered_ids: list[tuple[list[str], object, object]] = []
+    out = retrieve_internal_candidates_batch.call(
+        AUTH,
+        {
+            "clauses": [{"text": "外规第一条"}, {"text": "外规第二条"}],
+            "effective_from": "2026-01-01",
+            "effective_to": "2026-12-31",
+        },
+        {
+            "retriever": retriever,
+            "pg": object(),
+            "registry": registry,
+            "filter_target_chunks": lambda _pg, ids, effective_from, effective_to: (
+                filtered_ids.append((ids, effective_from, effective_to)) or set()
+            ),
+            "fetch_anchors": lambda _pg, _ids: {},
+            "fetch_texts": lambda _pg, _ids: {},
+        },
+    )
+
+    assert out["items"][0]["candidates"] == []
+    assert filtered_ids == [(["C-1"], "2026-01-01", "2026-12-31")]
+    assert "effective_date" in retriever.scopes[0]["extra_expr"]
+
+
 def test_rejects_an_entire_batch_when_every_retrieval_failed() -> None:
     class AllFailedRetriever(FakeRetriever):
         def retrieve_batch(self, queries, *, include_superseded=False):

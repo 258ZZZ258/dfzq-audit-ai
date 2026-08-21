@@ -39,7 +39,7 @@ TOOL = t.Tool(
 
 
 def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
-    clauses, include_superseded = _validate(arguments)
+    clauses, include_superseded, _effective_from, _effective_to = _validate(arguments)
     # 缺少外规授权时不发检索，保持输入同序空项，调用方不会把权限不足误报为基础设施故障。
     if "external" not in auth.corpus_types:
         return {

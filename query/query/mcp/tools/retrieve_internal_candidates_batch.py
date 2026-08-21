@@ -7,8 +7,12 @@
 
 from __future__ import annotations
 
-import mcp.types as t
+from datetime import date
 
+import mcp.types as t
+from sqlalchemy import or_, select
+
+from common.pg_models import Chunk, Document, DocVersion
 from query.mcp.scope import AuthScope, ScopeError, build_retrieval_scope
 
 TOOL = t.Tool(
@@ -35,6 +39,8 @@ TOOL = t.Tool(
                 },
             },
             "include_superseded": {"type": "boolean", "default": False},
+            "effective_from": {"type": "string", "format": "date"},
+            "effective_to": {"type": "string", "format": "date"},
         },
         "required": ["clauses"],
         "additionalProperties": False,
@@ -42,7 +48,20 @@ TOOL = t.Tool(
 )
 
 
-def _validate(arguments: dict) -> tuple[list[dict], bool]:
+def _optional_date(arguments: dict, key: str) -> str | None:
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ScopeError(-32602, f"invalid parameter: {key} must be an ISO date")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ScopeError(-32602, f"invalid parameter: {key} must be an ISO date") from exc
+    return value
+
+
+def _validate(arguments: dict) -> tuple[list[dict], bool, str | None, str | None]:
     clauses = arguments.get("clauses")
     if not isinstance(clauses, list) or not clauses or len(clauses) > 800:
         raise ScopeError(-32602, "invalid parameter: clauses must contain 1 to 800 items")
@@ -60,11 +79,36 @@ def _validate(arguments: dict) -> tuple[list[dict], bool]:
     include_superseded = arguments.get("include_superseded", False)
     if not isinstance(include_superseded, bool):
         raise ScopeError(-32602, "invalid parameter: include_superseded must be a boolean")
-    return normalized, include_superseded
+    effective_from = _optional_date(arguments, "effective_from")
+    effective_to = _optional_date(arguments, "effective_to")
+    if effective_from and effective_to and effective_from > effective_to:
+        raise ScopeError(-32602, "invalid parameter: date range is reversed")
+    return normalized, include_superseded, effective_from, effective_to
+
+
+def _filter_target_chunks(pg, chunk_ids: list[str], effective_from: str | None, effective_to: str | None) -> set[str]:
+    if not chunk_ids or (effective_from is None and effective_to is None):
+        return set(chunk_ids)
+    stmt = (
+        select(Chunk.chunk_id)
+        .join(DocVersion, DocVersion.doc_version_id == Chunk.doc_version_id)
+        .join(Document, Document.logical_id == DocVersion.logical_id)
+        .where(
+            Chunk.chunk_id.in_(chunk_ids),
+            Document.corpus_type == "P-INT",
+            DocVersion.version_status == "effective",
+        )
+    )
+    if effective_from:
+        stmt = stmt.where(or_(DocVersion.invalid_date.is_(None), DocVersion.invalid_date >= date.fromisoformat(effective_from)))
+    if effective_to:
+        stmt = stmt.where(or_(DocVersion.effective_date.is_(None), DocVersion.effective_date <= date.fromisoformat(effective_to)))
+    with pg.session() as session:
+        return set(session.scalars(stmt))
 
 
 def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
-    clauses, include_superseded = _validate(arguments)
+    clauses, include_superseded, effective_from, effective_to = _validate(arguments)
     # 没有内规授权时，不能向任何分区发检索；保持同序空项让调用方按外规条款生成缺失结果。
     if "internal" not in auth.corpus_types:
         return {
@@ -74,6 +118,11 @@ def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
 
     retriever = deps["retriever"]
     scope = build_retrieval_scope(auth, {"includeSuperseded": include_superseded})
+    if effective_to:
+        target_expr = f"(effective_date == 0 or effective_date <= {effective_to.replace('-', '')})"
+        scope["extra_expr"] = (
+            f"({scope['extra_expr']}) and {target_expr}" if scope["extra_expr"] else target_expr
+        )
     with retriever.scoped(**scope):
         batch = retriever.retrieve_batch([item["text"] for item in clauses], include_superseded=include_superseded)
     if len(batch) != len(clauses):
@@ -94,8 +143,11 @@ def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
             if not candidate.degraded
         )
     )
-    anchors = deps["fetch_anchors"](deps["pg"], ids) if ids else {}
-    texts = deps["fetch_texts"](deps["pg"], ids) if ids else {}
+    target_ids = deps.get("filter_target_chunks", _filter_target_chunks)(
+        deps["pg"], ids, effective_from, effective_to
+    )
+    anchors = deps["fetch_anchors"](deps["pg"], list(target_ids)) if target_ids else {}
+    texts = deps["fetch_texts"](deps["pg"], list(target_ids)) if target_ids else {}
 
     items = []
     returned_ids = []
@@ -103,6 +155,8 @@ def call(auth: AuthScope, arguments: dict, deps: dict) -> dict:
         candidates = []
         for candidate in item.candidates:
             if candidate.degraded:
+                continue
+            if candidate.chunk_id not in target_ids:
                 continue
             anchor = anchors.get(candidate.chunk_id)
             text = texts.get(candidate.chunk_id)
